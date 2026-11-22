@@ -1,0 +1,284 @@
+{% extends "base.html" %} {% block title %}Employee Dashboard - TravelExpense
+Pro{% endblock %} {% block content %}
+<div
+  style="
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 30px;
+  "
+>
+  <h1>Employee Dashboard</h1>
+  <div>
+    <span>Welcome, {{ session.get('username', 'User') }}!</span>
+    <a
+      href="{{ url_for('logout') }}"
+      class="btn btn-secondary"
+      style="margin-left: 15px"
+      >Logout</a
+    >
+  </div>
+</div>
+
+<!-- Add Expense Form -->
+<div class="card">
+  <h3>Add New Expense</h3>
+  <form method="POST" action="{{ url_for('add_expense') }}">
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px">
+      <div class="form-group">
+        <label for="destination">Destination</label>
+        <input
+          type="text"
+          id="destination"
+          name="destination"
+          class="form-control"
+          required
+        />
+      </div>
+      <div class="form-group">
+        <label for="purpose">Purpose</label>
+        <input
+          type="text"
+          id="purpose"
+          name="purpose"
+          class="form-control"
+          required
+        />
+      </div>
+      <div class="form-group">
+        <label for="date_from">From Date</label>
+        <input
+          type="date"
+          id="date_from"
+          name="date_from"
+          class="form-control"
+          required
+        />
+      </div>
+      <div class="form-group">
+        <label for="date_to">To Date</label>
+        <input
+          type="date"
+          id="date_to"
+          name="date_to"
+          class="form-control"
+          required
+        />
+      </div>
+      <div class="form-group">
+        <label for="local_currency">Currency</label>
+        <select
+          id="local_currency"
+          name="local_currency"
+          class="form-control"
+          required
+        >
+          <option value="USD">USD - US Dollar</option>
+          <option value="EUR">EUR - Euro</option>
+          <option value="LBP">LBP - Lebanese Pound</option>
+          <option value="AED">AED - UAE Dirham</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label for="local_amount">Local Amount</label>
+        <input
+          type="number"
+          id="local_amount"
+          name="local_amount"
+          class="form-control"
+          step="0.01"
+          min="0"
+          placeholder="Enter amount in local currency"
+          required
+        />
+      </div>
+      <div class="form-group">
+        <label for="usd_amount">USD Amount</label>
+        <input
+          type="number"
+          id="usd_amount"
+          class="form-control"
+          step="0.01"
+          readonly
+          placeholder="Auto-calculated"
+          style="background-color: #f8f9fa"
+        />
+        <input type="hidden" name="usd_amount" id="usd_amount_hidden" />
+        <input type="hidden" name="exchange_rate" id="exchange_rate_hidden" />
+      </div>
+    </div>
+    <button type="submit" class="btn btn-primary">Add Expense</button>
+  </form>
+</div>
+
+<!-- Recent Expenses Table -->
+<div class="card">
+  <h3>Recent Expenses</h3>
+  {% if expenses %}
+  <table class="table">
+    <thead>
+      <tr>
+        <th>Destination</th>
+        <th>Purpose</th>
+        <th>Period</th>
+        <th>Original Amount</th>
+        <th>USD Equivalent</th>
+        <th>Status</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for expense in expenses or [] %}
+      <tr>
+        <td>{{ expense.get('destination', '-') }}</td>
+        <td>{{ expense.get('purpose', '-') }}</td>
+        <td>
+          {{ expense.get('date_from', '-') }} to {{ expense.get('date_to', '-')
+          }}
+        </td>
+        <td>
+          {{ "%.2f"|format(expense.get('amount', 0)) }} {{
+          expense.get('currency', '') }}
+        </td>
+        <td>${{ "%.2f"|format(expense.get('usd_amount', 0)) }}</td>
+        <td>
+          {% set status = expense.get('report_status') or expense.get('status',
+          'pending') %}
+          <span
+            class="badge {% if status == 'approved' %}bg-success{% elif status == 'pending' %}bg-warning{% else %}bg-danger{% endif %}"
+          >
+            {{ status.title() }}
+          </span>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p>No expenses found. Add your first expense above!</p>
+  {% endif %}
+</div>
+
+<!-- Reports Status Table -->
+<div class="card">
+  <h3>My Reports Status</h3>
+  {% if reports %}
+  <table class="table">
+    <thead>
+      <tr>
+        <th>Title</th>
+        <th>Period</th>
+        <th>Original Amount</th>
+        <th>USD Amount</th>
+        <th>Status</th>
+        <th>Manager Comment</th>
+        <th>Submitted</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for report in reports or [] %}
+      <tr>
+        <td>{{ report.get('title') or 'Expense Report' }}</td>
+        <td>
+          {{ report.get('period_from', '-') }} to {{ report.get('period_to',
+          '-') }}
+        </td>
+        <td>
+          {{ "%.2f"|format(report.get('total_amount', 0)) }} {{
+          report.get('currency', 'USD') }}
+        </td>
+        <td>
+          ${{ "%.2f"|format(report.get('usd_amount') or
+          report.get('total_amount', 0)) }}
+        </td>
+        <td>
+          {% set r_status = report.get('status', 'pending') %}
+          <span
+            class="badge {% if r_status == 'approved' %}bg-success{% elif r_status == 'pending' %}bg-warning{% else %}bg-danger{% endif %}"
+          >
+            {{ r_status.title() }}
+          </span>
+        </td>
+        <td>
+          {% if report.get('manager_comment') and
+          report.get('manager_comment').strip() %}
+          <div
+            class="manager-comment {% if r_status == 'approved' %}approved{% elif r_status == 'declined' %}declined{% else %}pending{% endif %}"
+          >
+            <small><strong>Manager:</strong></small
+            ><br />
+            {{ report.get('manager_comment') }}
+          </div>
+          {% else %}
+          <span class="text-muted">—</span>
+          {% endif %}
+        </td>
+        <td>{{ report.get('created_at', '-') }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p>No reports found. Add an expense above to create your first report!</p>
+  {% endif %}
+</div>
+
+<!-- JavaScript for Currency Conversion -->
+<script>
+  let exchangeRates = {};
+
+  async function loadExchangeRates() {
+    try {
+      const response = await fetch("/get_exchange_rates");
+      if (response.ok) {
+        exchangeRates = await response.json();
+      }
+    } catch (error) {
+      console.error("Failed to load exchange rates:", error);
+    }
+  }
+
+  function updateUSDAmount() {
+    const amount =
+      parseFloat(document.getElementById("local_amount").value) || 0;
+    const currency = document.getElementById("local_currency").value;
+    const usdField = document.getElementById("usd_amount");
+    const usdHidden = document.getElementById("usd_amount_hidden");
+    const exchangeRateHidden = document.getElementById("exchange_rate_hidden");
+
+    if (!amount) {
+      usdField.value = "";
+      usdHidden.value = "";
+      exchangeRateHidden.value = "";
+      usdField.placeholder = "Auto-calculated";
+      return;
+    }
+
+    if (currency === "USD") {
+      usdField.value = amount.toFixed(2);
+      usdHidden.value = amount.toFixed(2);
+      exchangeRateHidden.value = "1.0";
+    } else if (exchangeRates[currency]) {
+      const rate = exchangeRates[currency];
+      const usdAmount = amount / rate;
+      usdField.value = usdAmount.toFixed(2);
+      usdHidden.value = usdAmount.toFixed(2);
+      exchangeRateHidden.value = (1 / rate).toFixed(6);
+    } else {
+      usdField.value = "";
+      usdHidden.value = "";
+      exchangeRateHidden.value = "";
+      usdField.placeholder = "Exchange rate not available";
+    }
+  }
+
+  document.addEventListener("DOMContentLoaded", () => {
+    loadExchangeRates();
+    document
+      .getElementById("local_amount")
+      .addEventListener("input", updateUSDAmount);
+    document
+      .getElementById("local_currency")
+      .addEventListener("change", updateUSDAmount);
+  });
+</script>
+{% endblock %}

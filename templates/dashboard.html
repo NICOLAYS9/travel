@@ -1,0 +1,131 @@
+{% extends "base.html" %} {% block title %}Manager Dashboard - TravelExpense
+Pro{% endblock %} {% block content %}
+<div
+  style="
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 30px;
+  "
+>
+  <h1>Manager Dashboard</h1>
+  <div>
+    <span>Welcome, {{ session.username }}!</span>
+    <a
+      href="{{ url_for('logout') }}"
+      class="btn btn-secondary"
+      style="margin-left: 15px"
+      >Logout</a
+    >
+  </div>
+</div>
+
+<!-- Stats Grid -->
+<div class="stats-grid">
+  <div class="stat-card">
+    <div class="stat-number">{{ pending_reports }}</div>
+    <div class="stat-label">Pending Reports</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-number">${{ "%.2f"|format(total_expenses) }}</div>
+    <div class="stat-label">Total USD Expenses This Month</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-number">{{ reports|length }}</div>
+    <div class="stat-label">Recent Reports</div>
+  </div>
+</div>
+
+<!-- Navigation -->
+<div class="card">
+  <h3>Quick Actions</h3>
+  <div style="display: flex; gap: 15px; flex-wrap: wrap">
+    <a href="{{ url_for('manage_employees') }}" class="btn btn-primary"
+      >Manage Employees</a
+    >
+    <a href="{{ url_for('reports') }}" class="btn btn-primary"
+      >View All Reports</a
+    >
+  </div>
+</div>
+
+<!-- Recent Reports -->
+<div class="card">
+  <h3>Recent Reports (All amounts shown in USD)</h3>
+  {% if reports %}
+  <table class="table">
+    <thead>
+      <tr>
+        <th>Employee</th>
+        <th>Title</th>
+        <th>Period</th>
+        <th>Original Amount</th>
+        <th>USD Amount</th>
+        <th>Status</th>
+        <th>Date</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for report in reports[:10] %}
+      <tr>
+        <td>{{ report.get('username') }}</td>
+        <td>{{ report.get('title') or 'Expense Report' }}</td>
+        <td>{{ report.get('period_from') }} to {{ report.get('period_to') }}</td>
+        <td>{{ "%.2f"|format(report.get('total_amount', 0)) }} {{ report.get('currency') or 'USD' }}</td>
+        <td class="currency-usd">
+          ${{ "%.2f"|format(report.get('usd_amount') or report.get('total_amount', 0)) }}
+        </td>
+        <td>
+          {% set status = report.get('status', 'pending') %}
+          <span
+            class="badge {% if status == 'approved' %}bg-success{% elif status == 'pending' %}bg-warning{% else %}bg-danger{% endif %}"
+          >
+            {{ status.title() }}
+          </span>
+        </td>
+        <td>{{ report.get('created_at') }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p>No reports found.</p>
+  {% endif %}
+</div>
+
+<script>
+  function showReportInfo(
+    id,
+    title,
+    periodFrom,
+    periodTo,
+    amount,
+    status,
+    date,
+    employee,
+    reason
+  ) {
+    // Report details functionality
+    console.log("Report info:", {
+      id,
+      title,
+      periodFrom,
+      periodTo,
+      amount,
+      status,
+      date,
+      employee,
+      reason,
+    });
+  }
+
+  function closeReportInfoModal() {
+    // Close modal functionality
+  }
+
+  function showReport(button) {
+    const title = button.dataset.title;
+    console.log("Show report:", title);
+  }
+</script>
+{% endblock %}

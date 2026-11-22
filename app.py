@@ -1,0 +1,1150 @@
+from flask import Flask, render_template, request, redirect, url_for, session, flash, jsonify, Response, g
+from pymongo import MongoClient
+from pymongo.errors import PyMongoError, DuplicateKeyError
+from bson.objectid import ObjectId
+from bson.errors import InvalidId
+from datetime import datetime, timedelta
+from functools import wraps
+import os
+import requests
+import json
+import webbrowser
+import jwt
+from dotenv import load_dotenv
+from flask_cors import CORS
+
+load_dotenv()
+
+app = Flask(__name__)
+app.secret_key = os.environ.get('SESSION_SECRET', 'your-secret-key-change-this')
+
+# API routes (used by the Flutter mobile app) are stateless/token-based, so they
+# need CORS + a JWT secret distinct from the browser session cookie mechanism.
+CORS(app, resources={r"/api/*": {"origins": "*"}})
+JWT_SECRET = os.environ.get('JWT_SECRET', app.secret_key)
+
+# --- SESSION COOKIE CONFIGURATION FOR LOCAL DEV ---
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,   # already default, keeps JS from accessing
+    SESSION_COOKIE_SECURE=False,    # must be False on HTTP localhost
+    SESSION_COOKIE_SAMESITE='Lax'   # prevents some CSRF warnings
+)
+
+# ------------------ DATABASE CONNECTION ------------------
+MONGODB_URI = os.environ.get('MONGODB_URI')
+MONGODB_DB = os.environ.get('MONGODB_DB', 'Midiss')
+
+_client = None
+
+def get_db():
+    """
+    Return the MongoDB database handle, reusing a single MongoClient
+    for the lifetime of the process (pymongo pools connections internally).
+    """
+    global _client
+    try:
+        if _client is None:
+            _client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=8000)
+        db = _client[MONGODB_DB]
+        return db
+    except PyMongoError as e:
+        print(f"Error connecting to MongoDB: {e}")
+        return None
+
+def oid(value):
+    """Safely convert a string/ObjectId to ObjectId, or return None if invalid."""
+    if isinstance(value, ObjectId):
+        return value
+    try:
+        return ObjectId(value)
+    except (InvalidId, TypeError):
+        return None
+
+def serialize(doc):
+    """Add a string 'id' field (mirrors the old auto-increment int id) for template compatibility."""
+    if doc is None:
+        return None
+    doc = dict(doc)
+    doc['id'] = str(doc.pop('_id'))
+    return doc
+
+def _report_belongs_to_manager(db, report, manager_id):
+    """True if the report's owner is an employee assigned to this manager."""
+    owner = db.users.find_one({'_id': oid(report.get('user_id'))})
+    return bool(owner) and owner.get('manager_id') == oid(manager_id)
+
+def to_json_safe(doc):
+    """
+    Like serialize(), but for JSON API responses: every ObjectId becomes a
+    string and every datetime becomes an ISO string, since jsonify() can't
+    encode either type directly.
+    """
+    if doc is None:
+        return None
+    out = {}
+    for key, value in dict(doc).items():
+        if key == '_id':
+            out['id'] = str(value)
+        elif isinstance(value, ObjectId):
+            out[key] = str(value)
+        elif isinstance(value, datetime):
+            out[key] = value.isoformat()
+        else:
+            out[key] = value
+    return out
+
+# ------------------ API AUTH (JWT, for the Flutter app) ------------------
+def generate_token(user):
+    payload = {
+        'user_id': str(user['_id']),
+        'username': user['username'],
+        'role': user['role'],
+        'exp': datetime.utcnow() + timedelta(days=7)
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm='HS256')
+
+def token_required(f):
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        auth_header = request.headers.get('Authorization', '')
+        if not auth_header.startswith('Bearer '):
+            return jsonify({'error': 'Missing or invalid Authorization header'}), 401
+        token = auth_header.split(' ', 1)[1]
+        try:
+            payload = jwt.decode(token, JWT_SECRET, algorithms=['HS256'])
+        except jwt.ExpiredSignatureError:
+            return jsonify({'error': 'Token expired'}), 401
+        except jwt.InvalidTokenError:
+            return jsonify({'error': 'Invalid token'}), 401
+        g.user_id = payload['user_id']
+        g.username = payload['username']
+        g.role = payload['role']
+        return f(*args, **kwargs)
+    return wrapper
+
+def manager_required(f):
+    @wraps(f)
+    def role_check(*args, **kwargs):
+        if g.role != 'manager':
+            return jsonify({'error': 'Manager role required'}), 403
+        return f(*args, **kwargs)
+    return token_required(role_check)
+
+# ------------------ CURRENCY FUNCTIONS ------------------
+def get_exchange_rates():
+    """
+    Fetch current exchange rates from API with caching in DB.
+    Cached if updated within last 6 hours.
+    """
+    db = get_db()
+    if db is None:
+        return None
+
+    try:
+        cutoff = datetime.utcnow() - timedelta(hours=6)
+        cached = db.exchange_rates.find_one(
+            {'updated_at': {'$gt': cutoff}},
+            sort=[('updated_at', -1)]
+        )
+        if cached:
+            data = cached['rates_data']
+            return data if isinstance(data, dict) else json.loads(data)
+
+        # fetch from external API
+        response = requests.get('https://open.er-api.com/v6/latest/USD', timeout=10)
+        if response.status_code == 200:
+            rates_data = response.json()
+            db.exchange_rates.insert_one({
+                'base_currency': 'USD',
+                'rates_data': rates_data,
+                'updated_at': datetime.utcnow()
+            })
+            return rates_data
+        else:
+            print(f"Exchange rate API returned status {response.status_code}")
+            return None
+    except Exception as e:
+        print(f"Error fetching exchange rates: {e}")
+        return None
+
+def convert_to_usd(amount, from_currency):
+    """
+    Convert amount from `from_currency` to USD using cached or fresh rates.
+    Returns (usd_amount, exchange_rate).
+    """
+    if from_currency == 'USD':
+        return amount, 1.0
+
+    rates_data = get_exchange_rates()
+    if not rates_data:
+        return None, None
+
+    rates = rates_data.get('rates', {})
+    if from_currency in rates:
+        exchange_rate = rates[from_currency]
+        # API gives price USD -> from_currency, so to convert from_currency to USD: amount / rate
+        usd_amount = amount / exchange_rate
+        return round(usd_amount, 2), round(1 / exchange_rate, 6)
+    return None, None
+
+def convert_currency(amount, from_currency, to_currency):
+    """
+    Convert amount from one currency to another via USD if needed.
+    """
+    if from_currency == to_currency:
+        return round(amount, 2)
+
+    rates_data = get_exchange_rates()
+    if not rates_data:
+        return round(amount, 2)
+
+    rates = rates_data.get('rates', {})
+
+    # Convert source to USD
+    if from_currency == 'USD':
+        usd_amount = amount
+    else:
+        if from_currency not in rates:
+            return round(amount, 2)
+        usd_amount = amount / rates[from_currency]
+
+    # Convert USD to target
+    if to_currency == 'USD':
+        return round(usd_amount, 2)
+    elif to_currency in rates:
+        target_amount = usd_amount * rates[to_currency]
+        return round(target_amount, 2)
+
+    return round(amount, 2)
+
+# ------------------ DATABASE SETUP ------------------
+def init_db():
+    """
+    Ensure indexes exist and insert default users.
+    Mongo collections are created implicitly on first insert, so there's
+    no CREATE TABLE step - just indexes + seed data.
+    """
+    db = get_db()
+    if db is None:
+        print("Failed to connect to database")
+        return
+
+    try:
+        db.users.create_index('username', unique=True)
+
+        if not db.users.find_one({'username': 'admin'}):
+            db.users.insert_one({
+                'username': 'admin',
+                'password': 'admin123',
+                'email': 'admin@company.com',
+                'role': 'manager',
+                'manager_id': None
+            })
+
+        if not db.users.find_one({'username': 'employee'}):
+            db.users.insert_one({
+                'username': 'employee',
+                'password': 'employee123',
+                'email': 'employee@company.com',
+                'role': 'employee',
+                'manager_id': None
+            })
+    except Exception as e:
+        print("Error initializing DB:", e)
+
+# ------------------ ROUTES ------------------
+
+@app.route('/')
+def home():
+    if 'user_id' not in session:
+        return redirect(url_for('login'))
+    return render_template('home_content.html')
+
+# ---------- Authentication ----------
+@app.route('/login', methods=['GET','POST'])
+def login():
+    if request.method == 'POST':
+        username = request.form.get('username', '').strip()
+        password = request.form.get('password', '').strip()
+
+        db = get_db()
+        if db is None:
+            flash('Database connection error!', 'error')
+            return render_template('login.html')
+
+        try:
+            user = db.users.find_one({'username': username, 'password': password})
+        except Exception as e:
+            print("Login query error:", e)
+            user = None
+
+        if user:
+            # store manager_id (nullable) too so templates/routes can use it if needed
+            session['user_id'] = str(user['_id'])
+            session['username'] = user['username']
+            session['role'] = user['role']
+            session['manager_id'] = str(user['manager_id']) if user.get('manager_id') else None
+            flash('Login successful!', 'success')
+            if user['role'] == 'manager':
+                return redirect(url_for('dashboard'))
+            else:
+                return redirect(url_for('employee_dashboard'))
+        else:
+            flash('Invalid username or password!', 'error')
+
+    return render_template('login.html')
+
+@app.route('/logout')
+def logout():
+    session.clear()  # clears cookie
+    flash('You have been logged out.', 'info')
+    return redirect(url_for('login'))
+
+
+# ---------- API for exchange rates (frontend) ----------
+
+
+@app.route('/get_exchange_rates', methods=['GET'])
+def get_exchange_rates_api():
+    rates_data = get_exchange_rates()
+    data = rates_data['rates'] if rates_data and 'rates' in rates_data else {}
+    return Response(
+        response=json.dumps(data),
+        status=200,
+        mimetype='application/json;charset=utf-8'
+    )
+
+# ---------- Manager Dashboard ----------
+@app.route('/dashboard')
+def dashboard():
+    if 'user_id' not in session or session.get('role') != 'manager':
+        return redirect(url_for('login'))
+
+    db = get_db()
+    if db is None:
+        flash('Database connection error!', 'error')
+        return redirect(url_for('login'))
+
+    try:
+        manager_oid = oid(session['user_id'])
+
+        # employees for this manager (use manager_id filtering so manager sees only own employees)
+        managed_employees = [
+            serialize(e) for e in db.users.find(
+                {'role': 'employee', 'manager_id': manager_oid},
+                {'password': 0}
+            )
+        ]
+        employee_ids = [oid(e['id']) for e in managed_employees]
+
+        # pending reports count — only for this manager's own employees
+        pending_reports_count = db.reports.count_documents({
+            'status': 'pending',
+            'user_id': {'$in': employee_ids}
+        })
+
+        # total expenses this month from approved reports (USD) — only this manager's employees
+        now = datetime.utcnow()
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        if month_start.month == 12:
+            next_month_start = month_start.replace(year=month_start.year + 1, month=1)
+        else:
+            next_month_start = month_start.replace(month=month_start.month + 1)
+
+        agg = list(db.reports.aggregate([
+            {'$match': {
+                'status': 'approved',
+                'user_id': {'$in': employee_ids},
+                'created_at': {'$gte': month_start, '$lt': next_month_start}
+            }},
+            {'$group': {'_id': None, 'total': {'$sum': '$usd_amount'}}}
+        ]))
+        total_expenses = agg[0]['total'] if agg else 0
+
+        # recent reports — only this manager's own employees
+        raw_reports = list(
+            db.reports.find({'user_id': {'$in': employee_ids}})
+            .sort('created_at', -1).limit(10)
+        )
+        users_by_id = {oid(e['id']): e for e in managed_employees}
+        reports = []
+        for r in raw_reports:
+            r = serialize(r)
+            owner = users_by_id.get(oid(r.get('user_id')))
+            r['username'] = owner['username'] if owner else 'Unknown'
+            reports.append(r)
+    except Exception as e:
+        print("Dashboard query error:", e)
+        flash('Error loading dashboard data', 'error')
+        reports = []
+        pending_reports_count = 0
+        total_expenses = 0
+        managed_employees = []
+
+    return render_template('dashboard.html',
+                           pending_reports=pending_reports_count,
+                           total_expenses=total_expenses,
+                           reports=reports,
+                           managed_employees=managed_employees)
+
+# -# --------- Employee Dashboard ----------
+@app.route('/employee_dashboard', methods=['GET', 'POST'])
+def employee_dashboard():
+    if 'user_id' not in session:
+        return redirect(url_for('login'))
+
+    db = get_db()
+    if db is None:
+        flash('Database connection error!', 'error')
+        return redirect(url_for('login'))
+
+    try:
+        user_oid = oid(session['user_id'])
+
+        # Get user's expenses, annotated with the status of any report for this user
+        # (mirrors the original per-user join: not a strict per-expense link)
+        user_reports = list(db.reports.find({'user_id': user_oid}))
+        latest_report_status = user_reports[0]['status'] if user_reports else None
+
+        raw_expenses = list(db.expenses.find({'user_id': user_oid}).sort('created_at', -1))
+        expenses = []
+        for e in raw_expenses:
+            e = serialize(e)
+            e['report_status'] = latest_report_status
+            expenses.append(e)
+
+        # Get user's reports
+        reports = [serialize(r) for r in
+                   db.reports.find({'user_id': user_oid}).sort('created_at', -1)]
+
+        # Current exchange rates
+        rates_data = get_exchange_rates()
+        current_rates = rates_data.get('rates', {}) if rates_data else {}
+
+        return render_template(
+            'employee_dashboard.html',
+            expenses=expenses,
+            reports=reports,
+            exchange_rates=current_rates,
+            session=session
+        )
+
+    except Exception as e:
+        print("Employee dashboard error:", e)
+        flash('Error loading employee dashboard', 'error')
+        return render_template(
+            'employee_dashboard.html',
+            expenses=[],
+            reports=[],
+            exchange_rates={},
+            session=session
+        )
+
+
+# ---------- Add Expense ----------
+@app.route('/add_expense', methods=['POST'])
+def add_expense():
+    if 'user_id' not in session:
+        return redirect(url_for('login'))
+
+    # Get form inputs safely
+    destination = request.form.get('destination', '').strip()
+    purpose = request.form.get('purpose', '').strip()
+    date_from = request.form.get('date_from') or None
+    date_to = request.form.get('date_to') or None
+    currency = request.form.get('local_currency', 'USD').strip()   # matches the form select name
+    amount_raw = request.form.get('local_amount', '0').strip()
+
+    try:
+        amount = float(amount_raw) if amount_raw else 0.0
+    except ValueError:
+        flash('Invalid amount provided', 'error')
+        return redirect(url_for('employee_dashboard'))
+
+    # Convert to USD using your function
+    usd_amount, exchange_rate = convert_to_usd(amount, currency)
+    if usd_amount is None:
+        flash(f'Warning: Could not convert {currency} to USD. Using original amount.', 'warning')
+        usd_amount = amount
+        exchange_rate = 1.0
+
+    db = get_db()
+    if db is None:
+        flash('Database connection error!', 'error')
+        return redirect(url_for('employee_dashboard'))
+
+    try:
+        user_oid = oid(session['user_id'])
+
+        # Insert expense with status = 'pending'
+        db.expenses.insert_one({
+            'user_id': user_oid,
+            'destination': destination,
+            'purpose': purpose,
+            'date_from': date_from,
+            'date_to': date_to,
+            'currency': currency,
+            'amount': amount,
+            'usd_amount': usd_amount,
+            'exchange_rate': exchange_rate,
+            'status': 'pending',
+            'created_at': datetime.utcnow()
+        })
+
+        # Auto-create a report for this expense (status 'pending')
+        report_title = f"Travel to {destination}" if destination else "Expense Report"
+        db.reports.insert_one({
+            'user_id': user_oid,
+            'title': report_title,
+            'period_from': date_from,
+            'period_to': date_to,
+            'total_amount': amount,
+            'usd_amount': usd_amount,
+            'currency': currency,
+            'status': 'pending',
+            'manager_comment': None,
+            'created_at': datetime.utcnow()
+        })
+
+        flash(f'Expense added successfully! Original: {amount} {currency}, USD: ${usd_amount}', 'success')
+
+    except Exception as e:
+        print("Add expense error:", e)
+        flash(f'Error adding expense: {e}', 'error')
+
+    return redirect(url_for('employee_dashboard'))
+
+# ---------- Currency converter page ----------
+@app.route('/currency_converter')
+def currency_converter():
+    if 'user_id' not in session:
+        return redirect(url_for('login'))
+
+    rates_data = get_exchange_rates()
+    return render_template('currency_converter.html', rates_data=rates_data)
+
+@app.route('/convert_currency', methods=['POST'])
+def convert_currency_api():
+    if 'user_id' not in session:
+        return jsonify({'error': 'Not authenticated'}), 401
+
+    try:
+        amount = float(request.form.get('amount', '0'))
+    except ValueError:
+        return jsonify({'error': 'Invalid amount'}), 400
+
+    from_currency = request.form.get('from_currency', 'USD').strip()
+    to_currency = request.form.get('to_currency', 'USD').strip()
+
+    converted_amount = convert_currency(amount, from_currency, to_currency)
+
+    return jsonify({
+        'original_amount': amount,
+        'from_currency': from_currency,
+        'to_currency': to_currency,
+        'converted_amount': converted_amount
+    })
+
+# ---------- Manage Employees (Manager only) ----------
+@app.route('/manage_employees')
+def manage_employees():
+    if 'user_id' not in session or session.get('role') != 'manager':
+        return redirect(url_for('login'))
+
+    db = get_db()
+    if db is None:
+        flash('Database connection error!', 'error')
+        return redirect(url_for('dashboard'))
+
+    try:
+        manager_oid = oid(session['user_id'])
+        # Show only employees that belong to this manager
+        employees = [serialize(e) for e in
+                     db.users.find({'role': 'employee', 'manager_id': manager_oid})]
+    except Exception as e:
+        print("Manage employees error:", e)
+        employees = []
+        flash('Error loading employees', 'error')
+
+    return render_template('manage_employees.html', employees=employees)
+
+@app.route('/add_employee', methods=['POST'])
+def add_employee():
+    if 'user_id' not in session or session.get('role') != 'manager':
+        return redirect(url_for('login'))
+
+    username = request.form.get('username', '').strip()
+    email = request.form.get('email', '').strip()
+    password = request.form.get('password', '').strip()
+    role = request.form.get('role', 'employee').strip()
+
+    db = get_db()
+    if db is None:
+        flash('Database connection error!', 'error')
+        return redirect(url_for('manage_employees'))
+
+    try:
+        # Set manager_id to current manager for employees
+        manager_id_value = oid(session['user_id']) if role == 'employee' else None
+        db.users.insert_one({
+            'username': username,
+            'password': password,
+            'email': email,
+            'role': role,
+            'manager_id': manager_id_value
+        })
+        flash(f'Employee {username} added successfully!', 'success')
+    except DuplicateKeyError:
+        flash('Username already exists!', 'error')
+    except Exception as e:
+        print("Add employee error:", e)
+        flash('Error adding employee', 'error')
+
+    return redirect(url_for('manage_employees'))
+
+@app.route('/edit_employee', methods=['POST'])
+def edit_employee():
+    if 'user_id' not in session or session.get('role') != 'manager':
+        return redirect(url_for('login'))
+
+    employee_id = request.form.get('employee_id')
+    username = request.form.get('username', '').strip()
+    email = request.form.get('email', '').strip()
+    role = request.form.get('role', 'employee').strip()
+    password = request.form.get('password', None)
+
+    db = get_db()
+    if db is None:
+        flash('Database connection error!', 'error')
+        return redirect(url_for('manage_employees'))
+
+    try:
+        employee_oid = oid(employee_id)
+
+        # Verify employee exists and belongs to this manager
+        owner = db.users.find_one({'_id': employee_oid})
+        if not owner:
+            flash('Employee not found!', 'error')
+            return redirect(url_for('manage_employees'))
+
+        manager_id_of_employee = owner.get('manager_id')
+        if manager_id_of_employee is not None and str(manager_id_of_employee) != session['user_id']:
+            flash('You are not authorized to edit this employee!', 'error')
+            return redirect(url_for('manage_employees'))
+
+        # Update employee with proper manager_id handling
+        update_fields = {'username': username, 'email': email, 'role': role}
+        if password:
+            update_fields['password'] = password
+
+        if role == 'employee':
+            update_fields['manager_id'] = oid(session['user_id'])
+        else:  # role is manager → manager_id should be NULL
+            update_fields['manager_id'] = None
+
+        db.users.update_one({'_id': employee_oid}, {'$set': update_fields})
+        flash(f'Employee {username} updated successfully!', 'success')
+
+    except Exception as e:
+        print("Edit employee error:", e)
+        flash('Error updating employee', 'error')
+
+    return redirect(url_for('manage_employees'))
+
+@app.route('/delete_employee', methods=['POST'])
+def delete_employee():
+    if 'user_id' not in session or session.get('role') != 'manager':
+        return redirect(url_for('login'))
+
+    employee_id = request.form.get('employee_id')
+
+    db = get_db()
+    if db is None:
+        flash('Database connection error!', 'error')
+        return redirect(url_for('manage_employees'))
+
+    try:
+        employee_oid = oid(employee_id)
+
+        # Verify employee exists and belongs to this manager
+        owner = db.users.find_one({'_id': employee_oid})
+        if not owner:
+            flash('Employee not found!', 'error')
+            return redirect(url_for('manage_employees'))
+
+        manager_id_of_employee = owner.get('manager_id')
+        if manager_id_of_employee is not None and str(manager_id_of_employee) != session['user_id']:
+            flash('You are not authorized to delete this employee!', 'error')
+            return redirect(url_for('manage_employees'))
+
+        # Delete employee (cascade: also remove their expenses/reports)
+        db.users.delete_one({'_id': employee_oid})
+        db.expenses.delete_many({'user_id': employee_oid})
+        db.reports.delete_many({'user_id': employee_oid})
+        flash('Employee deleted successfully!', 'success')
+
+    except Exception as e:
+        print("Delete employee error:", e)
+        flash('Error deleting employee', 'error')
+
+    return redirect(url_for('manage_employees'))
+
+# ---------- Reports (list for manager or employee) ----------
+@app.route('/reports')
+def reports():
+    if 'user_id' not in session:
+        return redirect(url_for('login'))
+
+    db = get_db()
+    if db is None:
+        flash('Database connection error!', 'error')
+        return redirect(url_for('login'))
+
+    try:
+        if session.get('role') == 'manager':
+            # manager sees only reports from employees assigned to them
+            manager_oid = oid(session['user_id'])
+            managed_employees = list(db.users.find(
+                {'role': 'employee', 'manager_id': manager_oid}, {'password': 0}
+            ))
+            employee_ids = [e['_id'] for e in managed_employees]
+            users_by_id = {e['_id']: e for e in managed_employees}
+
+            raw_reports = list(db.reports.find({'user_id': {'$in': employee_ids}}).sort('created_at', -1))
+            reports_data = []
+            for r in raw_reports:
+                r = serialize(r)
+                owner = users_by_id.get(oid(r.get('user_id')))
+                r['employee_name'] = owner['username'] if owner else 'Unknown'
+                reports_data.append(r)
+        else:
+            user_oid = oid(session['user_id'])
+            reports_data = [serialize(r) for r in
+                            db.reports.find({'user_id': user_oid}).sort('created_at', -1)]
+    except Exception as e:
+        print("Reports fetch error:", e)
+        flash('Error loading reports', 'error')
+        reports_data = []
+
+    return render_template('reports.html', reports=reports_data)
+
+@app.route('/approve_report/<report_id>')
+def approve_report(report_id):
+    if 'user_id' not in session or session.get('role') != 'manager':
+        return redirect(url_for('login'))
+
+    db = get_db()
+    if db is None:
+        flash('Database connection error!', 'error')
+        return redirect(url_for('reports'))
+
+    try:
+        report = db.reports.find_one({'_id': oid(report_id)})
+        if not report or not _report_belongs_to_manager(db, report, session['user_id']):
+            flash('You are not authorized to approve this report!', 'error')
+            return redirect(url_for('reports'))
+
+        db.reports.update_one({'_id': oid(report_id)}, {'$set': {'status': 'approved'}})
+        flash('Report approved successfully!', 'success')
+    except Exception as e:
+        print("Approve report error:", e)
+        flash('Error approving report', 'error')
+
+    return redirect(url_for('reports'))
+
+@app.route('/decline_report', methods=['POST'])
+def decline_report():
+    if 'user_id' not in session or session.get('role') != 'manager':
+        return redirect(url_for('login'))
+
+    report_id = request.form.get('report_id')
+    comment = request.form.get('comment', '')
+
+    db = get_db()
+    if db is None:
+        flash('Database connection error!', 'error')
+        return redirect(url_for('reports'))
+
+    try:
+        report = db.reports.find_one({'_id': oid(report_id)})
+        if not report or not _report_belongs_to_manager(db, report, session['user_id']):
+            flash('You are not authorized to decline this report!', 'error')
+            return redirect(url_for('reports'))
+
+        db.reports.update_one(
+            {'_id': oid(report_id)},
+            {'$set': {'status': 'declined', 'manager_comment': comment}}
+        )
+        flash(f'Report declined. Reason: {comment}', 'info')
+    except Exception as e:
+        print("Decline report error:", e)
+        flash('Error declining report', 'error')
+
+    return redirect(url_for('reports'))
+
+# ==================================================================
+# JSON API (token-auth) — used by the Flutter mobile app.
+# Mirrors the web routes above but is stateless (JWT instead of session
+# cookies) and returns JSON instead of rendered HTML.
+# ==================================================================
+
+@app.route('/api/login', methods=['POST'])
+def api_login():
+    data = request.get_json(silent=True) or request.form
+    username = (data.get('username') or '').strip()
+    password = (data.get('password') or '').strip()
+
+    db = get_db()
+    if db is None:
+        return jsonify({'error': 'Database connection error'}), 503
+
+    user = db.users.find_one({'username': username, 'password': password})
+    if not user:
+        return jsonify({'error': 'Invalid username or password'}), 401
+
+    token = generate_token(user)
+    return jsonify({
+        'token': token,
+        'user': {
+            'id': str(user['_id']),
+            'username': user['username'],
+            'email': user.get('email'),
+            'role': user['role'],
+            'manager_id': str(user['manager_id']) if user.get('manager_id') else None
+        }
+    })
+
+@app.route('/api/exchange_rates', methods=['GET'])
+@token_required
+def api_exchange_rates():
+    rates_data = get_exchange_rates()
+    return jsonify(rates_data.get('rates', {}) if rates_data else {})
+
+@app.route('/api/dashboard', methods=['GET'])
+@manager_required
+def api_dashboard():
+    db = get_db()
+    if db is None:
+        return jsonify({'error': 'Database connection error'}), 503
+
+    manager_oid = oid(g.user_id)
+    managed_employees = [
+        to_json_safe(e) for e in db.users.find(
+            {'role': 'employee', 'manager_id': manager_oid}, {'password': 0}
+        )
+    ]
+    employee_ids = [oid(e['id']) for e in managed_employees]
+
+    pending_reports_count = db.reports.count_documents({
+        'status': 'pending', 'user_id': {'$in': employee_ids}
+    })
+
+    now = datetime.utcnow()
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    if month_start.month == 12:
+        next_month_start = month_start.replace(year=month_start.year + 1, month=1)
+    else:
+        next_month_start = month_start.replace(month=month_start.month + 1)
+
+    agg = list(db.reports.aggregate([
+        {'$match': {
+            'status': 'approved',
+            'user_id': {'$in': employee_ids},
+            'created_at': {'$gte': month_start, '$lt': next_month_start}
+        }},
+        {'$group': {'_id': None, 'total': {'$sum': '$usd_amount'}}}
+    ]))
+    total_expenses = agg[0]['total'] if agg else 0
+
+    raw_reports = list(
+        db.reports.find({'user_id': {'$in': employee_ids}}).sort('created_at', -1).limit(10)
+    )
+    users_by_id = {oid(e['id']): e for e in managed_employees}
+    reports = []
+    for r in raw_reports:
+        r = to_json_safe(r)
+        owner = users_by_id.get(oid(r.get('user_id')))
+        r['username'] = owner['username'] if owner else 'Unknown'
+        reports.append(r)
+
+    return jsonify({
+        'pending_reports': pending_reports_count,
+        'total_expenses': total_expenses,
+        'reports': reports,
+        'managed_employees': managed_employees
+    })
+
+@app.route('/api/employee_dashboard', methods=['GET'])
+@token_required
+def api_employee_dashboard():
+    db = get_db()
+    if db is None:
+        return jsonify({'error': 'Database connection error'}), 503
+
+    user_oid = oid(g.user_id)
+    user_reports = list(db.reports.find({'user_id': user_oid}))
+    latest_report_status = user_reports[0]['status'] if user_reports else None
+
+    expenses = []
+    for e in db.expenses.find({'user_id': user_oid}).sort('created_at', -1):
+        e = to_json_safe(e)
+        e['report_status'] = latest_report_status
+        expenses.append(e)
+
+    reports = [to_json_safe(r) for r in
+               db.reports.find({'user_id': user_oid}).sort('created_at', -1)]
+
+    rates_data = get_exchange_rates()
+    current_rates = rates_data.get('rates', {}) if rates_data else {}
+
+    return jsonify({
+        'expenses': expenses,
+        'reports': reports,
+        'exchange_rates': current_rates
+    })
+
+@app.route('/api/expenses', methods=['POST'])
+@token_required
+def api_add_expense():
+    data = request.get_json(silent=True) or request.form
+
+    destination = (data.get('destination') or '').strip()
+    purpose = (data.get('purpose') or '').strip()
+    date_from = data.get('date_from') or None
+    date_to = data.get('date_to') or None
+    currency = (data.get('currency') or 'USD').strip()
+
+    try:
+        amount = float(data.get('amount') or 0)
+    except (ValueError, TypeError):
+        return jsonify({'error': 'Invalid amount provided'}), 400
+
+    usd_amount, exchange_rate = convert_to_usd(amount, currency)
+    if usd_amount is None:
+        usd_amount = amount
+        exchange_rate = 1.0
+
+    db = get_db()
+    if db is None:
+        return jsonify({'error': 'Database connection error'}), 503
+
+    user_oid = oid(g.user_id)
+
+    expense_doc = {
+        'user_id': user_oid,
+        'destination': destination,
+        'purpose': purpose,
+        'date_from': date_from,
+        'date_to': date_to,
+        'currency': currency,
+        'amount': amount,
+        'usd_amount': usd_amount,
+        'exchange_rate': exchange_rate,
+        'status': 'pending',
+        'created_at': datetime.utcnow()
+    }
+    result = db.expenses.insert_one(expense_doc)
+
+    report_title = f"Travel to {destination}" if destination else "Expense Report"
+    db.reports.insert_one({
+        'user_id': user_oid,
+        'title': report_title,
+        'period_from': date_from,
+        'period_to': date_to,
+        'total_amount': amount,
+        'usd_amount': usd_amount,
+        'currency': currency,
+        'status': 'pending',
+        'manager_comment': None,
+        'created_at': datetime.utcnow()
+    })
+
+    expense_doc['_id'] = result.inserted_id
+    return jsonify({'message': 'Expense added successfully', 'expense': to_json_safe(expense_doc)}), 201
+
+@app.route('/api/reports', methods=['GET'])
+@token_required
+def api_reports():
+    db = get_db()
+    if db is None:
+        return jsonify({'error': 'Database connection error'}), 503
+
+    if g.role == 'manager':
+        manager_oid = oid(g.user_id)
+        managed_employees = list(db.users.find(
+            {'role': 'employee', 'manager_id': manager_oid}, {'password': 0}
+        ))
+        employee_ids = [e['_id'] for e in managed_employees]
+        users_by_id = {e['_id']: e for e in managed_employees}
+
+        raw_reports = list(db.reports.find({'user_id': {'$in': employee_ids}}).sort('created_at', -1))
+        reports_data = []
+        for r in raw_reports:
+            r = to_json_safe(r)
+            owner = users_by_id.get(oid(r.get('user_id')))
+            r['employee_name'] = owner['username'] if owner else 'Unknown'
+            reports_data.append(r)
+    else:
+        user_oid = oid(g.user_id)
+        reports_data = [to_json_safe(r) for r in
+                        db.reports.find({'user_id': user_oid}).sort('created_at', -1)]
+
+    return jsonify(reports_data)
+
+@app.route('/api/reports/<report_id>/approve', methods=['POST'])
+@manager_required
+def api_approve_report(report_id):
+    db = get_db()
+    if db is None:
+        return jsonify({'error': 'Database connection error'}), 503
+
+    report = db.reports.find_one({'_id': oid(report_id)})
+    if not report or not _report_belongs_to_manager(db, report, g.user_id):
+        return jsonify({'error': 'Not authorized to approve this report'}), 403
+
+    db.reports.update_one({'_id': oid(report_id)}, {'$set': {'status': 'approved'}})
+    return jsonify({'message': 'Report approved successfully'})
+
+@app.route('/api/reports/<report_id>/decline', methods=['POST'])
+@manager_required
+def api_decline_report(report_id):
+    data = request.get_json(silent=True) or request.form
+    comment = data.get('comment', '')
+
+    db = get_db()
+    if db is None:
+        return jsonify({'error': 'Database connection error'}), 503
+
+    report = db.reports.find_one({'_id': oid(report_id)})
+    if not report or not _report_belongs_to_manager(db, report, g.user_id):
+        return jsonify({'error': 'Not authorized to decline this report'}), 403
+
+    db.reports.update_one(
+        {'_id': oid(report_id)},
+        {'$set': {'status': 'declined', 'manager_comment': comment}}
+    )
+    return jsonify({'message': f'Report declined. Reason: {comment}'})
+
+@app.route('/api/employees', methods=['GET'])
+@manager_required
+def api_list_employees():
+    db = get_db()
+    if db is None:
+        return jsonify({'error': 'Database connection error'}), 503
+
+    manager_oid = oid(g.user_id)
+    employees = [to_json_safe(e) for e in
+                 db.users.find({'role': 'employee', 'manager_id': manager_oid}, {'password': 0})]
+    return jsonify(employees)
+
+@app.route('/api/employees', methods=['POST'])
+@manager_required
+def api_add_employee():
+    data = request.get_json(silent=True) or request.form
+    username = (data.get('username') or '').strip()
+    email = (data.get('email') or '').strip()
+    password = (data.get('password') or '').strip()
+    role = (data.get('role') or 'employee').strip()
+
+    db = get_db()
+    if db is None:
+        return jsonify({'error': 'Database connection error'}), 503
+
+    try:
+        manager_id_value = oid(g.user_id) if role == 'employee' else None
+        result = db.users.insert_one({
+            'username': username,
+            'password': password,
+            'email': email,
+            'role': role,
+            'manager_id': manager_id_value
+        })
+        return jsonify({'message': f'Employee {username} added successfully', 'id': str(result.inserted_id)}), 201
+    except DuplicateKeyError:
+        return jsonify({'error': 'Username already exists'}), 409
+
+@app.route('/api/employees/<employee_id>', methods=['PUT'])
+@manager_required
+def api_edit_employee(employee_id):
+    data = request.get_json(silent=True) or request.form
+    username = (data.get('username') or '').strip()
+    email = (data.get('email') or '').strip()
+    role = (data.get('role') or 'employee').strip()
+    password = data.get('password')
+
+    db = get_db()
+    if db is None:
+        return jsonify({'error': 'Database connection error'}), 503
+
+    employee_oid = oid(employee_id)
+    owner = db.users.find_one({'_id': employee_oid})
+    if not owner:
+        return jsonify({'error': 'Employee not found'}), 404
+
+    manager_id_of_employee = owner.get('manager_id')
+    if manager_id_of_employee is not None and str(manager_id_of_employee) != g.user_id:
+        return jsonify({'error': 'Not authorized to edit this employee'}), 403
+
+    update_fields = {'username': username, 'email': email, 'role': role}
+    if password:
+        update_fields['password'] = password
+    update_fields['manager_id'] = oid(g.user_id) if role == 'employee' else None
+
+    db.users.update_one({'_id': employee_oid}, {'$set': update_fields})
+    return jsonify({'message': f'Employee {username} updated successfully'})
+
+@app.route('/api/employees/<employee_id>', methods=['DELETE'])
+@manager_required
+def api_delete_employee(employee_id):
+    db = get_db()
+    if db is None:
+        return jsonify({'error': 'Database connection error'}), 503
+
+    employee_oid = oid(employee_id)
+    owner = db.users.find_one({'_id': employee_oid})
+    if not owner:
+        return jsonify({'error': 'Employee not found'}), 404
+
+    manager_id_of_employee = owner.get('manager_id')
+    if manager_id_of_employee is not None and str(manager_id_of_employee) != g.user_id:
+        return jsonify({'error': 'Not authorized to delete this employee'}), 403
+
+    db.users.delete_one({'_id': employee_oid})
+    db.expenses.delete_many({'user_id': employee_oid})
+    db.reports.delete_many({'user_id': employee_oid})
+    return jsonify({'message': 'Employee deleted successfully'})
+
+@app.route('/api/convert_currency', methods=['POST'])
+@token_required
+def api_convert_currency():
+    data = request.get_json(silent=True) or request.form
+    try:
+        amount = float(data.get('amount', 0))
+    except (ValueError, TypeError):
+        return jsonify({'error': 'Invalid amount'}), 400
+
+    from_currency = (data.get('from_currency') or 'USD').strip()
+    to_currency = (data.get('to_currency') or 'USD').strip()
+    converted_amount = convert_currency(amount, from_currency, to_currency)
+
+    return jsonify({
+        'original_amount': amount,
+        'from_currency': from_currency,
+        'to_currency': to_currency,
+        'converted_amount': converted_amount
+    })
+
+# ------------------ RUN APP ------------------
+# Initialize indexes + seed data (safe: idempotent). Runs on import so it
+# also happens under a production WSGI server (gunicorn), which never
+# executes the __main__ block below.
+init_db()
+
+if __name__ == '__main__':
+    # try to open browser for dev convenience
+    try:
+        webbrowser.open("http://127.0.0.1:5050")
+    except:
+        pass
+
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5050)), debug=True)

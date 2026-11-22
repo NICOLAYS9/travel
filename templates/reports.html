@@ -1,0 +1,143 @@
+{% extends "base.html" %} {% block title %}Reports - TravelExpense Pro{%
+endblock %} {% block content %}
+<div
+  style="
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 30px;
+  "
+>
+  <h1>Reports</h1>
+  <a
+    href="{% if session.role == 'manager' %}{{ url_for('dashboard') }}{% else %}{{ url_for('employee_dashboard') }}{% endif %}"
+    class="btn btn-secondary"
+    >Back to Dashboard</a
+  >
+</div>
+
+<div class="card">
+  <h3>
+    {% if session.role == 'manager' %}All Reports{% else %}My Reports{% endif %}
+  </h3>
+
+  {% if reports %}
+  <table class="table">
+    <thead>
+      <tr>
+        {% if session.role == 'manager' %}
+        <th>Employee</th>
+        {% endif %}
+        <th>Title</th>
+        <th>Period From</th>
+        <th>Period To</th>
+        <th>Original Amount</th>
+        <th>USD Amount</th>
+        <th>Status</th>
+        <th>Created</th>
+        {% if session.role == 'manager' %}
+        <th>Actions</th>
+        {% endif %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for report in reports %}
+      <tr>
+        {% if session.role == 'manager' %}
+        <td>{{ report.get('employee_name', 'N/A') }}</td>
+        {% endif %}
+        <td>{{ report.get('title', 'Expense Report') }}</td>
+        <td>{{ report.get('period_from', 'N/A') }}</td>
+        <td>{{ report.get('period_to', 'N/A') }}</td>
+        <td>
+          {{ "%.2f"|format(report.get('total_amount', 0)) }} {{
+          report.get('currency', 'USD') }}
+        </td>
+        <td class="currency-usd">
+          ${{ "%.2f"|format(report.get('usd_amount', report.get('total_amount',
+          0))) }}
+        </td>
+        <td>
+          {% set status = report.get('status', 'pending') %}
+          <span
+            class="badge {% if status == 'approved' %}bg-success{% elif status == 'pending' %}bg-warning{% else %}bg-danger{% endif %}"
+          >
+            {{ status.title() }}
+          </span>
+        </td>
+        <td>{{ report.get('created_at', 'N/A') }}</td>
+
+        {% if session.role == 'manager' %} {% if status == 'pending' %}
+        <td>
+          <div style="display: flex; gap: 5px">
+            <a
+              href="{{ url_for('approve_report', report_id=report.get('id')) }}"
+              class="btn btn-success"
+              style="padding: 6px 12px; font-size: 14px"
+              onclick="return confirm('Approve this report?');"
+            >
+              ✅ Approve
+            </a>
+            <button
+              class="btn btn-danger"
+              style="padding: 6px 12px; font-size: 14px"
+              onclick="openDeclineModal({{ report.get('id') }})"
+            >
+              ❌ Decline
+            </button>
+          </div>
+        </td>
+        {% else %}
+        <td>-</td>
+        {% endif %} {% endif %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p>No reports found.</p>
+  {% endif %}
+</div>
+
+{% if session.role == 'manager' %}
+<!-- Decline Modal -->
+<div id="declineModal" class="modal">
+  <div class="modal-content">
+    <span class="close" onclick="closeModal()">&times;</span>
+    <h3>Decline Report</h3>
+    <form method="POST" action="{{ url_for('decline_report') }}">
+      <input type="hidden" id="decline_report_id" name="report_id" value="" />
+      <div class="form-group">
+        <label for="comment">Reason for Decline</label>
+        <textarea
+          id="comment"
+          name="comment"
+          class="form-control"
+          placeholder="Provide reason..."
+          required
+        ></textarea>
+      </div>
+      <div style="display: flex; gap: 10px; justify-content: flex-end">
+        <button type="button" class="btn btn-secondary" onclick="closeModal()">
+          Cancel
+        </button>
+        <button type="submit" class="btn btn-danger">Decline Report</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<script>
+  function openDeclineModal(reportId) {
+    document.getElementById("decline_report_id").value = reportId;
+    document.getElementById("declineModal").style.display = "block";
+  }
+  function closeModal() {
+    document.getElementById("declineModal").style.display = "none";
+  }
+  window.onclick = function (event) {
+    const modal = document.getElementById("declineModal");
+    if (event.target == modal) modal.style.display = "none";
+  };
+</script>
+{% endif %} {% endblock %}

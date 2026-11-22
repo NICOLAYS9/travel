@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Login - TravelExpense Pro</title>
+    <style>
+      body {
+        font-family: "Arial", sans-serif;
+        background-color: #f0f2f5;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        min-height: 100vh;
+        margin: 0;
+      }
+
+      .container {
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        width: 100%;
+        padding: 20px;
+      }
+
+      .login-box {
+        background-color: #ffffff;
+        padding: 40px;
+        border-radius: 10px;
+        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
+        text-align: center;
+        width: 100%;
+        max-width: 400px;
+      }
+
+      .login-box h2 {
+        margin-bottom: 30px;
+        color: #333;
+        font-size: 2em;
+      }
+
+      .login-box input[type="text"],
+      .login-box input[type="password"] {
+        width: calc(100% - 20px);
+        padding: 12px 10px;
+        margin-bottom: 20px;
+        border: 1px solid #ddd;
+        border-radius: 5px;
+        font-size: 1em;
+        box-sizing: border-box;
+      }
+
+      .login-box input[type="text"]:focus,
+      .login-box input[type="password"]:focus {
+        border-color: #007bff;
+        outline: none;
+        box-shadow: 0 0 5px rgba(0, 123, 255, 0.2);
+      }
+
+      .login-box button[type="submit"] {
+        width: 100%;
+        padding: 12px;
+        background-color: #007bff;
+        color: white;
+        border: none;
+        border-radius: 5px;
+        font-size: 1em;
+        cursor: pointer;
+        transition: background-color 0.3s;
+      }
+
+      .login-box button[type="submit"]:hover {
+        background-color: #0056b3;
+      }
+
+      .alert {
+        padding: 15px;
+        margin-bottom: 20px;
+        border-radius: 4px;
+      }
+
+      .alert-success {
+        background-color: #d4edda;
+        color: #155724;
+      }
+
+      .alert-error {
+        background-color: #f8d7da;
+        color: #721c24;
+      }
+
+      .alert-info {
+        background-color: #d1ecf1;
+        color: #0c5460;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <div class="login-box">
+        <h2>TravelExpense Pro Login</h2>
+
+        {% with messages = get_flashed_messages(with_categories=true) %} {% if
+        messages %} {% for category, message in messages %}
+        <div class="alert alert-{{ category }}">{{ message }}</div>
+        {% endfor %} {% endif %} {% endwith %}
+
+        <form method="POST">
+          <input type="text" name="username" placeholder="Username" required />
+          <input
+            type="password"
+            name="password"
+            placeholder="Password"
+            required
+          />
+          <button type="submit">Login</button>
+        </form>
+      </div>
+    </div>
+  </body>
+</html>

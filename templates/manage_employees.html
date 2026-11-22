@@ -1,0 +1,250 @@
+{% extends "base.html" %} {% block title %}Manage Employees - TravelExpense
+Pro{% endblock %} {% block content %}
+<div
+  style="
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 30px;
+  "
+>
+  <h1>Manage Employees</h1>
+  <div>
+    <button
+      class="btn btn-primary"
+      onclick="openAddEmployeeModal()"
+      style="margin-right: 10px"
+    >
+      + Add Employee
+    </button>
+    <a href="{{ url_for('dashboard') }}" class="btn btn-secondary"
+      >Back to Dashboard</a
+    >
+  </div>
+</div>
+
+<div class="card">
+  <h3>Employee List</h3>
+  {% if employees %}
+  <table class="table">
+    <thead>
+      <tr>
+        <th>Username</th>
+        <th>Email</th>
+        <th>Role</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for employee in employees %}
+      <tr>
+        <td>{{ employee.get('username', 'N/A') }}</td>
+        <td>{{ employee.get('email', 'N/A') }}</td>
+        <td>{{ employee.get('role', 'employee').title() }}</td>
+
+        <td>
+          <button
+            class="btn btn-secondary"
+            style="margin-right: 5px"
+            onclick="viewEmployeeDetails('{{ employee.get('id') }}', '{{ employee.get('username') }}', '{{ employee.get('email') }}', '{{ employee.get('role') }}')"
+          >
+            View Details
+          </button>
+
+          <button
+            class="btn btn-danger"
+            onclick="deleteEmployee('{{ employee.get('id') }}', '{{ employee.get('username') }}')"
+          >
+            Delete
+          </button>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p>No employees found.</p>
+  {% endif %}
+</div>
+
+<!-- Add Employee Modal -->
+<div id="addEmployeeModal" class="modal">
+  <div class="modal-content">
+    <span class="close" onclick="closeModal('addEmployeeModal')">&times;</span>
+    <h3>Add New Employee</h3>
+
+    <form method="POST" action="{{ url_for('add_employee') }}">
+      <div class="form-group">
+        <label>Username:</label>
+        <input type="text" name="username" class="form-control" required />
+      </div>
+      <div class="form-group">
+        <label>Email:</label>
+        <input type="email" name="email" class="form-control" required />
+      </div>
+      <div class="form-group">
+        <label>Password:</label>
+        <input type="password" name="password" class="form-control" required />
+      </div>
+      <div class="form-group">
+        <label>Role:</label>
+        <select name="role" class="form-control" required>
+          <option value="employee">Employee</option>
+          <option value="manager">Manager</option>
+        </select>
+      </div>
+      <div style="text-align: center; margin-top: 20px">
+        <button type="submit" class="btn btn-primary">Add Employee</button>
+        <button
+          type="button"
+          class="btn btn-secondary"
+          onclick="closeModal('addEmployeeModal')"
+        >
+          Cancel
+        </button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Employee Details Modal -->
+<div id="employeeDetailsModal" class="modal">
+  <div class="modal-content">
+    <span class="close" onclick="closeModal('employeeDetailsModal')"
+      >&times;</span
+    >
+    <h3>Employee Details</h3>
+
+    <form
+      id="editEmployeeForm"
+      method="POST"
+      action="{{ url_for('edit_employee') }}"
+    >
+      <input type="hidden" id="edit_employee_id" name="employee_id" />
+
+      <div class="form-group">
+        <label>Username:</label>
+        <input
+          type="text"
+          id="edit_username"
+          name="username"
+          class="form-control"
+          required
+        />
+      </div>
+      <div class="form-group">
+        <label>Email:</label>
+        <input
+          type="email"
+          id="edit_email"
+          name="email"
+          class="form-control"
+          required
+        />
+      </div>
+      <div class="form-group">
+        <label>Role:</label>
+        <select id="edit_role" name="role" class="form-control" required>
+          <option value="employee">Employee</option>
+          <option value="manager">Manager</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>New Password (leave blank to keep current):</label>
+        <input
+          type="password"
+          id="edit_password"
+          name="password"
+          class="form-control"
+        />
+      </div>
+
+      <div style="text-align: center; margin-top: 20px">
+        <button type="submit" class="btn btn-primary">Update Employee</button>
+        <button
+          type="button"
+          class="btn btn-secondary"
+          onclick="closeModal('employeeDetailsModal')"
+        >
+          Cancel
+        </button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Delete Confirmation Modal -->
+<div id="deleteConfirmModal" class="modal">
+  <div class="modal-content">
+    <span class="close" onclick="closeModal('deleteConfirmModal')"
+      >&times;</span
+    >
+    <h3>Confirm Delete</h3>
+    <p>
+      Are you sure you want to delete employee
+      <strong id="deleteEmployeeName"></strong>?
+    </p>
+    <p style="color: #e74c3c">This action cannot be undone.</p>
+
+    <form
+      id="deleteEmployeeForm"
+      method="POST"
+      action="{{ url_for('delete_employee') }}"
+    >
+      <input type="hidden" id="delete_employee_id" name="employee_id" />
+
+      <div style="text-align: center; margin-top: 20px">
+        <button type="submit" class="btn btn-danger">Yes, Delete</button>
+        <button
+          type="button"
+          class="btn btn-secondary"
+          onclick="closeModal('deleteConfirmModal')"
+        >
+          Cancel
+        </button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<script>
+  function openAddEmployeeModal() {
+    document.getElementById("addEmployeeModal").style.display = "block";
+  }
+
+  function viewEmployeeDetails(id, username, email, role) {
+    document.getElementById("edit_employee_id").value = id;
+    document.getElementById("edit_username").value = username;
+    document.getElementById("edit_email").value = email;
+    document.getElementById("edit_role").value = role;
+    document.getElementById("edit_password").value = "";
+
+    document.getElementById("employeeDetailsModal").style.display = "block";
+  }
+
+  function deleteEmployee(id, username) {
+    document.getElementById("delete_employee_id").value = id;
+    document.getElementById("deleteEmployeeName").innerText = username;
+    document.getElementById("deleteConfirmModal").style.display = "block";
+  }
+
+  function closeModal(modalId) {
+    document.getElementById(modalId).style.display = "none";
+  }
+
+  // Close modal when clicking outside
+  window.onclick = function (event) {
+    const modals = [
+      "addEmployeeModal",
+      "employeeDetailsModal",
+      "deleteConfirmModal",
+    ];
+    modals.forEach((modalId) => {
+      const modal = document.getElementById(modalId);
+      if (event.target == modal) {
+        modal.style.display = "none";
+      }
+    });
+  };
+</script>
+{% endblock %}
