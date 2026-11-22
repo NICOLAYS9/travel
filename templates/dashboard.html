@@ -1,23 +1,7 @@
-{% extends "base.html" %} {% block title %}Manager Dashboard - TravelExpense
-Pro{% endblock %} {% block content %}
-<div
-  style="
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 30px;
-  "
->
+{% extends "base.html" %} {% block title %}Dashboard - TravelExpense Pro{%
+endblock %} {% block content %}
+<div class="page-header">
   <h1>Manager Dashboard</h1>
-  <div>
-    <span>Welcome, {{ session.username }}!</span>
-    <a
-      href="{{ url_for('logout') }}"
-      class="btn btn-secondary"
-      style="margin-left: 15px"
-      >Logout</a
-    >
-  </div>
 </div>
 
 <!-- Stats Grid -->
@@ -33,25 +17,6 @@ Pro{% endblock %} {% block content %}
   <div class="stat-card">
     <div class="stat-number">{{ reports|length }}</div>
     <div class="stat-label">Recent Reports</div>
-  </div>
-</div>
-
-<!-- Navigation -->
-<div class="card">
-  <h3>Quick Actions</h3>
-  <div style="display: flex; gap: 15px; flex-wrap: wrap">
-    <a href="{{ url_for('manage_employees') }}" class="btn btn-primary"
-      >Manage Employees</a
-    >
-    <a href="{{ url_for('reports') }}" class="btn btn-primary"
-      >View All Reports</a
-    >
-    <a href="{{ url_for('analytics_page') }}" class="btn btn-primary"
-      >Analytics</a
-    >
-    <a href="{{ url_for('audit_log_page') }}" class="btn btn-primary"
-      >Audit Log</a
-    >
   </div>
 </div>
 
@@ -95,43 +60,7 @@ Pro{% endblock %} {% block content %}
     </tbody>
   </table>
   {% else %}
-  <p>No reports found.</p>
+  <p class="text-muted">No reports found.</p>
   {% endif %}
 </div>
-
-<script>
-  function showReportInfo(
-    id,
-    title,
-    periodFrom,
-    periodTo,
-    amount,
-    status,
-    date,
-    employee,
-    reason
-  ) {
-    // Report details functionality
-    console.log("Report info:", {
-      id,
-      title,
-      periodFrom,
-      periodTo,
-      amount,
-      status,
-      date,
-      employee,
-      reason,
-    });
-  }
-
-  function closeReportInfoModal() {
-    // Close modal functionality
-  }
-
-  function showReport(button) {
-    const title = button.dataset.title;
-    console.log("Show report:", title);
-  }
-</script>
 {% endblock %}

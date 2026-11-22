@@ -1,0 +1,103 @@
+{% extends "base.html" %} {% block title %}Currency Converter - TravelExpense
+Pro{% endblock %} {% block content %}
+<div class="page-header">
+  <h1>Currency Converter</h1>
+</div>
+
+<div class="card" style="max-width: 480px">
+  <div class="form-group">
+    <label for="amount">Amount</label>
+    <input
+      type="number"
+      id="amount"
+      class="form-control"
+      value="100"
+      min="0"
+      step="0.01"
+    />
+  </div>
+
+  <div style="display: grid; grid-template-columns: 1fr auto 1fr; gap: 12px; align-items: end">
+    <div class="form-group" style="margin-bottom: 0">
+      <label for="from_currency">From</label>
+      <select id="from_currency" class="form-control">
+        {% if rates_data and rates_data.rates %} {% for code in
+        rates_data.rates.keys()|sort %}
+        <option value="{{ code }}" {% if code=='USD' %}selected{% endif %}>
+          {{ code }}
+        </option>
+        {% endfor %} {% else %}
+        <option value="USD">USD</option>
+        {% endif %}
+      </select>
+    </div>
+    <button
+      type="button"
+      class="btn btn-secondary"
+      style="padding: 10px 12px"
+      onclick="swapCurrencies()"
+    >
+      ⇄
+    </button>
+    <div class="form-group" style="margin-bottom: 0">
+      <label for="to_currency">To</label>
+      <select id="to_currency" class="form-control">
+        {% if rates_data and rates_data.rates %} {% for code in
+        rates_data.rates.keys()|sort %}
+        <option value="{{ code }}" {% if code=='EUR' %}selected{% endif %}>
+          {{ code }}
+        </option>
+        {% endfor %} {% else %}
+        <option value="EUR">EUR</option>
+        {% endif %}
+      </select>
+    </div>
+  </div>
+
+  <button
+    type="button"
+    class="btn btn-primary"
+    style="margin-top: 20px; width: 100%"
+    onclick="convert()"
+  >
+    Convert
+  </button>
+
+  <div
+    id="result"
+    class="converter-result"
+    style="display: none; margin-top: 20px"
+  ></div>
+</div>
+
+<script>
+  function swapCurrencies() {
+    const from = document.getElementById("from_currency");
+    const to = document.getElementById("to_currency");
+    const tmp = from.value;
+    from.value = to.value;
+    to.value = tmp;
+  }
+
+  async function convert() {
+    const amount = parseFloat(document.getElementById("amount").value) || 0;
+    const from_currency = document.getElementById("from_currency").value;
+    const to_currency = document.getElementById("to_currency").value;
+    const resultBox = document.getElementById("result");
+
+    try {
+      const response = await fetch("/convert_currency", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ amount, from_currency, to_currency }),
+      });
+      const data = await response.json();
+      resultBox.textContent = `${amount} ${from_currency} = ${data.converted_amount} ${to_currency}`;
+      resultBox.style.display = "block";
+    } catch (error) {
+      resultBox.textContent = "Conversion failed. Please try again.";
+      resultBox.style.display = "block";
+    }
+  }
+</script>
+{% endblock %}

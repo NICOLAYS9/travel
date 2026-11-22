@@ -1,24 +1,10 @@
 {% extends "base.html" %} {% block title %}Reports - TravelExpense Pro{%
 endblock %} {% block content %}
-<div
-  style="
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 30px;
-  "
->
+<div class="page-header">
   <h1>Reports</h1>
-  <div style="display: flex; gap: 10px">
-    <a href="{{ url_for('export_reports_csv') }}" class="btn btn-secondary"
-      >Export CSV</a
-    >
-    <a
-      href="{% if session.role == 'manager' %}{{ url_for('dashboard') }}{% else %}{{ url_for('employee_dashboard') }}{% endif %}"
-      class="btn btn-secondary"
-      >Back to Dashboard</a
-    >
-  </div>
+  <a href="{{ url_for('export_reports_csv') }}" class="btn btn-secondary"
+    >Export CSV</a
+  >
 </div>
 
 <div class="card">

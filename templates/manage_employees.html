@@ -1,26 +1,10 @@
 {% extends "base.html" %} {% block title %}Manage Employees - TravelExpense
 Pro{% endblock %} {% block content %}
-<div
-  style="
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 30px;
-  "
->
+<div class="page-header">
   <h1>Manage Employees</h1>
-  <div>
-    <button
-      class="btn btn-primary"
-      onclick="openAddEmployeeModal()"
-      style="margin-right: 10px"
-    >
-      + Add Employee
-    </button>
-    <a href="{{ url_for('dashboard') }}" class="btn btn-secondary"
-      >Back to Dashboard</a
-    >
-  </div>
+  <button class="btn btn-primary" onclick="openAddEmployeeModal()">
+    + Add Employee
+  </button>
 </div>
 
 <div class="card">

@@ -10,15 +10,82 @@
     />
   </head>
   <body>
+    {% if session.get('user_id') %}
+    <nav class="navbar">
+      <div class="navbar-inner">
+        <a href="{{ url_for('home') }}" class="navbar-brand">
+          <span class="navbar-brand-mark">T</span>
+          TravelExpense
+        </a>
+        <div class="navbar-links">
+          {% if session.role == 'manager' %}
+          <a
+            href="{{ url_for('dashboard') }}"
+            class="navbar-link {% if request.endpoint == 'dashboard' %}active{% endif %}"
+            >Dashboard</a
+          >
+          <a
+            href="{{ url_for('reports') }}"
+            class="navbar-link {% if request.endpoint == 'reports' %}active{% endif %}"
+            >Reports</a
+          >
+          <a
+            href="{{ url_for('analytics_page') }}"
+            class="navbar-link {% if request.endpoint == 'analytics_page' %}active{% endif %}"
+            >Analytics</a
+          >
+          <a
+            href="{{ url_for('manage_employees') }}"
+            class="navbar-link {% if request.endpoint == 'manage_employees' %}active{% endif %}"
+            >Employees</a
+          >
+          <a
+            href="{{ url_for('audit_log_page') }}"
+            class="navbar-link {% if request.endpoint == 'audit_log_page' %}active{% endif %}"
+            >Audit Log</a
+          >
+          {% else %}
+          <a
+            href="{{ url_for('employee_dashboard') }}"
+            class="navbar-link {% if request.endpoint == 'employee_dashboard' %}active{% endif %}"
+            >Dashboard</a
+          >
+          <a
+            href="{{ url_for('reports') }}"
+            class="navbar-link {% if request.endpoint == 'reports' %}active{% endif %}"
+            >Reports</a
+          >
+          {% endif %}
+          <a
+            href="{{ url_for('currency_converter') }}"
+            class="navbar-link {% if request.endpoint == 'currency_converter' %}active{% endif %}"
+            >Converter</a
+          >
+        </div>
+        <div class="navbar-user">
+          <span class="navbar-username"
+            ><strong>{{ session.get('username', '') }}</strong> ({{
+            session.get('role', '')|title }})</span
+          >
+          <a href="{{ url_for('logout') }}" class="btn btn-secondary">Logout</a>
+        </div>
+      </div>
+    </nav>
+    {% endif %}
+
     <!-- Flash Messages -->
     {% with messages = get_flashed_messages(with_categories=true) %} {% if
-    messages %} {% for category, message in messages %}
-    <div
-      class="alert alert-{{ 'danger' if category == 'error' else category }}"
-    >
-      {{ message }}
+    messages %}
+    <div class="container" style="padding-bottom: 0">
+      {% for category, message in messages %}
+      <div
+        class="alert alert-{{ 'danger' if category == 'error' else category }}"
+      >
+        {{ message }}
+      </div>
+      {% endfor %}
     </div>
-    {% endfor %} {% endif %} {% endwith %}
+    {% endif %} {% endwith %}
 
     <div class="container">{% block content %}{% endblock %}</div>
 
