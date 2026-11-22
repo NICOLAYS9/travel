@@ -52,7 +52,11 @@ endblock %} {% block content %}
           <span class="text-muted">{{ flight.get('arrival_scheduled', '-') }}</span>
         </td>
         <td>
-          <span class="badge bg-success">{{ flight.get('status', 'scheduled')|title }}</span>
+          {% set fstatus = flight.get('status', 'scheduled') %}
+          <span
+            class="badge {% if fstatus in ['cancelled', 'incident', 'diverted'] %}bg-danger{% elif fstatus == 'scheduled' %}bg-warning{% else %}bg-success{% endif %}"
+            >{{ fstatus|title }}</span
+          >
         </td>
         {% if session.role == 'manager' %}
         <td>

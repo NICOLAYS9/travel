@@ -321,12 +321,12 @@ def refresh_flights_if_stale(db, force=False):
             if not (departure.get('iata') and arrival.get('iata')):
                 continue
             flight_docs.append({
-                'flight_number': flight.get('iata') or flight.get('number') or 'N/A',
-                'airline_name': airline.get('name') or 'Unknown Airline',
-                'departure_airport': departure.get('airport') or departure.get('iata'),
+                'flight_number': (flight.get('iata') or flight.get('number') or 'N/A').strip(),
+                'airline_name': (airline.get('name') or 'Unknown Airline').strip(),
+                'departure_airport': (departure.get('airport') or departure.get('iata') or '').strip(),
                 'departure_iata': departure.get('iata'),
                 'departure_scheduled': departure.get('scheduled'),
-                'arrival_airport': arrival.get('airport') or arrival.get('iata'),
+                'arrival_airport': (arrival.get('airport') or arrival.get('iata') or '').strip(),
                 'arrival_iata': arrival.get('iata'),
                 'arrival_scheduled': arrival.get('scheduled'),
                 'status': f.get('flight_status') or 'scheduled',
