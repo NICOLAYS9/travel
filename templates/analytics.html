@@ -1,0 +1,110 @@
+{% extends "base.html" %} {% block title %}Analytics - TravelExpense Pro{%
+endblock %} {% block content %}
+<div
+  style="
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 30px;
+  "
+>
+  <h1>Analytics</h1>
+  <a href="{{ url_for('dashboard') }}" class="btn btn-secondary"
+    >Back to Dashboard</a
+  >
+</div>
+
+<div class="card">
+  <h3>Approved Spend by Month (USD, last 12 months)</h3>
+  <canvas id="monthlyChart" height="90"></canvas>
+</div>
+
+<div class="card">
+  <h3>Approved Spend by Employee (USD)</h3>
+  <canvas id="employeeChart" height="90"></canvas>
+</div>
+
+<div class="card">
+  <h3>Spend by Destination (USD, top 10)</h3>
+  <canvas id="destinationChart" height="90"></canvas>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<script>
+  const monthlyLabels = {{ data.monthly_labels | tojson }};
+  const monthlyTotals = {{ data.monthly_totals | tojson }};
+  const employeeLabels = {{ data.by_employee_labels | tojson }};
+  const employeeTotals = {{ data.by_employee_totals | tojson }};
+  const destinationLabels = {{ data.by_destination_labels | tojson }};
+  const destinationTotals = {{ data.by_destination_totals | tojson }};
+
+  function emptyState(canvasId, message) {
+    const canvas = document.getElementById(canvasId);
+    const ctx = canvas.getContext("2d");
+    ctx.font = "16px sans-serif";
+    ctx.fillStyle = "#888";
+    ctx.textAlign = "center";
+    ctx.fillText(message, canvas.width / 2, canvas.height / 2);
+  }
+
+  if (monthlyLabels.length === 0) {
+    emptyState("monthlyChart", "No approved reports yet.");
+  } else {
+    new Chart(document.getElementById("monthlyChart"), {
+      type: "line",
+      data: {
+        labels: monthlyLabels,
+        datasets: [
+          {
+            label: "USD Spend",
+            data: monthlyTotals,
+            borderColor: "#2563eb",
+            backgroundColor: "rgba(37, 99, 235, 0.1)",
+            fill: true,
+            tension: 0.3,
+          },
+        ],
+      },
+      options: { responsive: true },
+    });
+  }
+
+  if (employeeLabels.length === 0) {
+    emptyState("employeeChart", "No approved reports yet.");
+  } else {
+    new Chart(document.getElementById("employeeChart"), {
+      type: "bar",
+      data: {
+        labels: employeeLabels,
+        datasets: [
+          {
+            label: "USD Spend",
+            data: employeeTotals,
+            backgroundColor: "#2563eb",
+          },
+        ],
+      },
+      options: { responsive: true },
+    });
+  }
+
+  if (destinationLabels.length === 0) {
+    emptyState("destinationChart", "No expenses yet.");
+  } else {
+    new Chart(document.getElementById("destinationChart"), {
+      type: "bar",
+      data: {
+        labels: destinationLabels,
+        datasets: [
+          {
+            label: "USD Spend",
+            data: destinationTotals,
+            backgroundColor: "#16a34a",
+          },
+        ],
+      },
+      options: { responsive: true, indexAxis: "y" },
+    });
+  }
+</script>
+{% endblock %}

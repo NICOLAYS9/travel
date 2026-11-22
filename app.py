@@ -10,6 +10,8 @@ import requests
 import json
 import webbrowser
 import jwt
+import csv
+import io
 from dotenv import load_dotenv
 from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -811,6 +813,122 @@ def decline_report():
 
     return redirect(url_for('reports'))
 
+# ---------- Analytics (manager only) ----------
+def _compute_analytics(db, manager_oid):
+    """
+    Three breakdowns scoped to this manager's own employees:
+    monthly approved-spend trend, spend by employee, and spend by
+    destination (from expenses, since that's where destination lives).
+    """
+    employee_ids = [e['_id'] for e in
+                    db.users.find({'role': 'employee', 'manager_id': manager_oid}, {'_id': 1})]
+    employees_by_id = {e['_id']: e['username'] for e in
+                        db.users.find({'_id': {'$in': employee_ids}}, {'username': 1})}
+
+    twelve_months_ago = datetime.utcnow() - timedelta(days=365)
+
+    monthly_trend = list(db.reports.aggregate([
+        {'$match': {'status': 'approved', 'user_id': {'$in': employee_ids},
+                    'created_at': {'$gte': twelve_months_ago}}},
+        {'$group': {
+            '_id': {'year': {'$year': '$created_at'}, 'month': {'$month': '$created_at'}},
+            'total': {'$sum': '$usd_amount'}
+        }},
+        {'$sort': {'_id.year': 1, '_id.month': 1}}
+    ]))
+    monthly_labels = [f"{m['_id']['year']}-{m['_id']['month']:02d}" for m in monthly_trend]
+    monthly_totals = [round(m['total'], 2) for m in monthly_trend]
+
+    by_employee_raw = list(db.reports.aggregate([
+        {'$match': {'status': 'approved', 'user_id': {'$in': employee_ids}}},
+        {'$group': {'_id': '$user_id', 'total': {'$sum': '$usd_amount'}}},
+        {'$sort': {'total': -1}}
+    ]))
+    by_employee_labels = [employees_by_id.get(r['_id'], 'Unknown') for r in by_employee_raw]
+    by_employee_totals = [round(r['total'], 2) for r in by_employee_raw]
+
+    by_destination_raw = list(db.expenses.aggregate([
+        {'$match': {'user_id': {'$in': employee_ids}}},
+        {'$group': {'_id': '$destination', 'total': {'$sum': '$usd_amount'}}},
+        {'$sort': {'total': -1}},
+        {'$limit': 10}
+    ]))
+    by_destination_labels = [r['_id'] or 'Unknown' for r in by_destination_raw]
+    by_destination_totals = [round(r['total'], 2) for r in by_destination_raw]
+
+    return {
+        'monthly_labels': monthly_labels,
+        'monthly_totals': monthly_totals,
+        'by_employee_labels': by_employee_labels,
+        'by_employee_totals': by_employee_totals,
+        'by_destination_labels': by_destination_labels,
+        'by_destination_totals': by_destination_totals,
+    }
+
+@app.route('/analytics')
+def analytics_page():
+    if 'user_id' not in session or session.get('role') != 'manager':
+        return redirect(url_for('login'))
+
+    db = get_db()
+    if db is None:
+        flash('Database connection error!', 'error')
+        return redirect(url_for('dashboard'))
+
+    data = _compute_analytics(db, oid(session['user_id']))
+    return render_template('analytics.html', data=data)
+
+# ---------- Export reports as CSV ----------
+@app.route('/reports/export.csv')
+def export_reports_csv():
+    if 'user_id' not in session:
+        return redirect(url_for('login'))
+
+    db = get_db()
+    if db is None:
+        flash('Database connection error!', 'error')
+        return redirect(url_for('reports'))
+
+    if session.get('role') == 'manager':
+        manager_oid = oid(session['user_id'])
+        employee_ids = [e['_id'] for e in
+                        db.users.find({'role': 'employee', 'manager_id': manager_oid}, {'_id': 1})]
+        employees_by_id = {e['_id']: e['username'] for e in
+                            db.users.find({'_id': {'$in': employee_ids}}, {'username': 1})}
+        raw_reports = db.reports.find({'user_id': {'$in': employee_ids}}).sort('created_at', -1)
+    else:
+        user_oid = oid(session['user_id'])
+        employees_by_id = {}
+        raw_reports = db.reports.find({'user_id': user_oid}).sort('created_at', -1)
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    header = ['Title', 'Period From', 'Period To', 'Amount', 'Currency', 'USD Amount', 'Status', 'Created At']
+    if session.get('role') == 'manager':
+        header.insert(0, 'Employee')
+    writer.writerow(header)
+
+    for r in raw_reports:
+        row = [
+            r.get('title', 'Expense Report'),
+            r.get('period_from', ''),
+            r.get('period_to', ''),
+            r.get('total_amount', ''),
+            r.get('currency', 'USD'),
+            r.get('usd_amount', ''),
+            r.get('status', 'pending'),
+            r.get('created_at', ''),
+        ]
+        if session.get('role') == 'manager':
+            row.insert(0, employees_by_id.get(r.get('user_id'), 'Unknown'))
+        writer.writerow(row)
+
+    return Response(
+        output.getvalue(),
+        mimetype='text/csv',
+        headers={'Content-Disposition': 'attachment; filename=reports_export.csv'}
+    )
+
 # ---------- Audit Log (manager only) ----------
 @app.route('/audit_log')
 def audit_log_page():
@@ -919,6 +1037,14 @@ def api_dashboard():
         'reports': reports,
         'managed_employees': managed_employees
     })
+
+@app.route('/api/analytics', methods=['GET'])
+@manager_required
+def api_analytics():
+    db = get_db()
+    if db is None:
+        return jsonify({'error': 'Database connection error'}), 503
+    return jsonify(_compute_analytics(db, oid(g.user_id)))
 
 @app.route('/api/employee_dashboard', methods=['GET'])
 @token_required
