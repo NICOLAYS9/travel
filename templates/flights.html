@@ -1,0 +1,93 @@
+{% extends "base.html" %} {% block title %}Flights - TravelExpense Pro{%
+endblock %} {% block content %}
+<div class="page-header">
+  <h1>Current Flights</h1>
+  {% if session.role == 'manager' %}
+  <form method="POST" action="{{ url_for('refresh_flights_now') }}">
+    <button type="submit" class="btn btn-secondary">Refresh Flights</button>
+  </form>
+  {% endif %}
+</div>
+
+{% if not has_api_key %}
+<div class="alert alert-warning">
+  No AviationStack API key is configured yet, so no live flights are shown.
+  Add <code>AVIATIONSTACK_API_KEY</code> to the environment to enable this.
+</div>
+{% endif %}
+
+<div class="card">
+  <h3>
+    {% if session.role == 'manager' %}All Current Flights &amp; Client
+    Bookings{% else %}Pick a Flight to Book for a Client{% endif %}
+  </h3>
+
+  {% if flights %}
+  <table class="table">
+    <thead>
+      <tr>
+        <th>Flight</th>
+        <th>Airline</th>
+        <th>Departure</th>
+        <th>Arrival</th>
+        <th>Status</th>
+        {% if session.role == 'manager' %}
+        <th>Clients</th>
+        {% else %}
+        <th>Action</th>
+        {% endif %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for flight in flights %}
+      <tr>
+        <td>{{ flight.get('flight_number', '-') }}</td>
+        <td>{{ flight.get('airline_name', '-') }}</td>
+        <td>
+          {{ flight.get('departure_iata', '-') }}<br />
+          <span class="text-muted">{{ flight.get('departure_scheduled', '-') }}</span>
+        </td>
+        <td>
+          {{ flight.get('arrival_iata', '-') }}<br />
+          <span class="text-muted">{{ flight.get('arrival_scheduled', '-') }}</span>
+        </td>
+        <td>
+          <span class="badge bg-success">{{ flight.get('status', 'scheduled')|title }}</span>
+        </td>
+        {% if session.role == 'manager' %}
+        <td>
+          {% set info = booking_counts.get(flight.get('flight_number')) %} {%
+          if info %}
+          <details>
+            <summary style="cursor: pointer; font-weight: 600; color: var(--color-accent)">
+              {{ info.count }} client{{ 's' if info.count != 1 else '' }}
+            </summary>
+            <ul style="margin-top: 8px; padding-left: 18px">
+              {% for d in info.details %}
+              <li>{{ d.client_name }} &mdash; booked by {{ d.employee }}</li>
+              {% endfor %}
+            </ul>
+          </details>
+          {% else %}
+          <span class="text-muted">0 clients</span>
+          {% endif %}
+        </td>
+        {% else %}
+        <td>
+          <a
+            href="{{ url_for('book_flight', flight_id=flight.get('id')) }}"
+            class="btn btn-primary"
+            style="padding: 6px 12px; font-size: 13px"
+            >Book for Client</a
+          >
+        </td>
+        {% endif %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="text-muted">No flights available right now.</p>
+  {% endif %}
+</div>
+{% endblock %}

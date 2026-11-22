@@ -35,6 +35,11 @@
             >Analytics</a
           >
           <a
+            href="{{ url_for('flights_page') }}"
+            class="navbar-link {% if request.endpoint in ['flights_page', 'book_flight'] %}active{% endif %}"
+            >Flights</a
+          >
+          <a
             href="{{ url_for('manage_employees') }}"
             class="navbar-link {% if request.endpoint == 'manage_employees' %}active{% endif %}"
             >Employees</a
@@ -54,6 +59,11 @@
             href="{{ url_for('reports') }}"
             class="navbar-link {% if request.endpoint == 'reports' %}active{% endif %}"
             >Reports</a
+          >
+          <a
+            href="{{ url_for('flights_page') }}"
+            class="navbar-link {% if request.endpoint in ['flights_page', 'book_flight'] %}active{% endif %}"
+            >Flights</a
           >
           {% endif %}
           <a

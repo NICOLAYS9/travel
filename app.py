@@ -275,6 +275,135 @@ def convert_currency(amount, from_currency, to_currency):
 
     return round(amount, 2)
 
+# ------------------ FLIGHTS (AviationStack, cached) ------------------
+AVIATIONSTACK_API_KEY = os.environ.get('AVIATIONSTACK_API_KEY')
+FLIGHT_CACHE_TTL_HOURS = 12
+FLIGHT_CACHE_MONTHLY_CALL_LIMIT = 90  # AviationStack free tier allows 100/month - leave headroom
+
+def refresh_flights_if_stale(db, force=False):
+    """
+    Refresh the cached 'current flights' list from AviationStack if the
+    cache is older than FLIGHT_CACHE_TTL_HOURS (or force=True). Tracks a
+    monthly call counter so we never approach the free tier's 100/month cap -
+    refreshes are skipped (silently, serving stale data) once that's at risk.
+    """
+    if not AVIATIONSTACK_API_KEY:
+        return
+
+    meta = db.flight_cache_meta.find_one({'_id': 'singleton'}) or {}
+    current_month = datetime.utcnow().strftime('%Y-%m')
+    calls_this_month = meta.get('calls_this_month', 0) if meta.get('call_month') == current_month else 0
+
+    last_fetched_at = meta.get('last_fetched_at')
+    stale = not last_fetched_at or (datetime.utcnow() - last_fetched_at) > timedelta(hours=FLIGHT_CACHE_TTL_HOURS)
+    if not (stale or force):
+        return
+
+    if calls_this_month >= FLIGHT_CACHE_MONTHLY_CALL_LIMIT:
+        print(f"Flight cache refresh skipped: monthly call limit reached ({calls_this_month})")
+        return
+
+    try:
+        response = requests.get(
+            'http://api.aviationstack.com/v1/flights',
+            params={'access_key': AVIATIONSTACK_API_KEY, 'limit': 100},
+            timeout=15
+        )
+        response.raise_for_status()
+        data = response.json().get('data', [])
+
+        flight_docs = []
+        for f in data:
+            departure = f.get('departure') or {}
+            arrival = f.get('arrival') or {}
+            airline = f.get('airline') or {}
+            flight = f.get('flight') or {}
+            if not (departure.get('iata') and arrival.get('iata')):
+                continue
+            flight_docs.append({
+                'flight_number': flight.get('iata') or flight.get('number') or 'N/A',
+                'airline_name': airline.get('name') or 'Unknown Airline',
+                'departure_airport': departure.get('airport') or departure.get('iata'),
+                'departure_iata': departure.get('iata'),
+                'departure_scheduled': departure.get('scheduled'),
+                'arrival_airport': arrival.get('airport') or arrival.get('iata'),
+                'arrival_iata': arrival.get('iata'),
+                'arrival_scheduled': arrival.get('scheduled'),
+                'status': f.get('flight_status') or 'scheduled',
+                'fetched_at': datetime.utcnow()
+            })
+
+        if flight_docs:
+            db.flights.delete_many({})
+            db.flights.insert_many(flight_docs)
+
+        db.flight_cache_meta.update_one(
+            {'_id': 'singleton'},
+            {'$set': {'last_fetched_at': datetime.utcnow(), 'calls_this_month': calls_this_month + 1, 'call_month': current_month}},
+            upsert=True
+        )
+    except Exception as e:
+        print("Flight cache refresh failed:", e)
+
+def _create_expense_and_report(db, user_oid, destination, purpose, date_from, date_to,
+                                currency, amount, receipt_file, client_name=None,
+                                flight_number=None, airline_name=None):
+    """
+    Shared by the plain "Add Expense" flow and the "Book a Flight for a
+    Client" flow - both end up creating the same expense+report pair, just
+    with different origin data (typed in vs. pre-filled from a flight).
+    """
+    usd_amount, exchange_rate = convert_to_usd(amount, currency)
+    if usd_amount is None:
+        usd_amount = amount
+        exchange_rate = 1.0
+
+    receipt_file_id = save_receipt_image(db, receipt_file)
+
+    expense_doc = {
+        'user_id': user_oid,
+        'destination': destination,
+        'purpose': purpose,
+        'date_from': date_from,
+        'date_to': date_to,
+        'currency': currency,
+        'amount': amount,
+        'usd_amount': usd_amount,
+        'exchange_rate': exchange_rate,
+        'status': 'pending',
+        'receipt_file_id': receipt_file_id,
+        'client_name': client_name,
+        'flight_number': flight_number,
+        'airline_name': airline_name,
+        'created_at': datetime.utcnow()
+    }
+    result = db.expenses.insert_one(expense_doc)
+
+    if client_name:
+        report_title = f"{client_name} — {destination}" if destination else f"Booking for {client_name}"
+    else:
+        report_title = f"Travel to {destination}" if destination else "Expense Report"
+
+    db.reports.insert_one({
+        'user_id': user_oid,
+        'title': report_title,
+        'period_from': date_from,
+        'period_to': date_to,
+        'total_amount': amount,
+        'usd_amount': usd_amount,
+        'currency': currency,
+        'status': 'pending',
+        'manager_comment': None,
+        'receipt_file_id': receipt_file_id,
+        'client_name': client_name,
+        'flight_number': flight_number,
+        'airline_name': airline_name,
+        'created_at': datetime.utcnow()
+    })
+
+    expense_doc['_id'] = result.inserted_id
+    return expense_doc, usd_amount
+
 # ------------------ DATABASE SETUP ------------------
 def init_db():
     """
@@ -290,6 +419,7 @@ def init_db():
     try:
         db.users.create_index('username', unique=True)
         db.audit_log.create_index('created_at')
+        db.flights.create_index('departure_scheduled')
 
         if not db.users.find_one({'username': 'admin'}):
             db.users.insert_one({
@@ -521,13 +651,6 @@ def add_expense():
         flash('Invalid amount provided', 'error')
         return redirect(url_for('employee_dashboard'))
 
-    # Convert to USD using your function
-    usd_amount, exchange_rate = convert_to_usd(amount, currency)
-    if usd_amount is None:
-        flash(f'Warning: Could not convert {currency} to USD. Using original amount.', 'warning')
-        usd_amount = amount
-        exchange_rate = 1.0
-
     db = get_db()
     if db is None:
         flash('Database connection error!', 'error')
@@ -535,40 +658,10 @@ def add_expense():
 
     try:
         user_oid = oid(session['user_id'])
-        receipt_file_id = save_receipt_image(db, request.files.get('receipt'))
-
-        # Insert expense with status = 'pending'
-        db.expenses.insert_one({
-            'user_id': user_oid,
-            'destination': destination,
-            'purpose': purpose,
-            'date_from': date_from,
-            'date_to': date_to,
-            'currency': currency,
-            'amount': amount,
-            'usd_amount': usd_amount,
-            'exchange_rate': exchange_rate,
-            'status': 'pending',
-            'receipt_file_id': receipt_file_id,
-            'created_at': datetime.utcnow()
-        })
-
-        # Auto-create a report for this expense (status 'pending')
-        report_title = f"Travel to {destination}" if destination else "Expense Report"
-        db.reports.insert_one({
-            'user_id': user_oid,
-            'title': report_title,
-            'period_from': date_from,
-            'period_to': date_to,
-            'total_amount': amount,
-            'usd_amount': usd_amount,
-            'currency': currency,
-            'status': 'pending',
-            'manager_comment': None,
-            'receipt_file_id': receipt_file_id,
-            'created_at': datetime.utcnow()
-        })
-
+        _, usd_amount = _create_expense_and_report(
+            db, user_oid, destination, purpose, date_from, date_to,
+            currency, amount, request.files.get('receipt')
+        )
         flash(f'Expense added successfully! Original: {amount} {currency}, USD: ${usd_amount}', 'success')
 
     except Exception as e:
@@ -617,6 +710,111 @@ def view_report_receipt(report_id):
     fs = gridfs.GridFS(db, collection='receipts')
     grid_file = fs.get(report['receipt_file_id'])
     return Response(grid_file.read(), mimetype=grid_file.content_type or 'image/jpeg')
+
+# ---------- Flights (agency-style client bookings) ----------
+def _flight_booking_counts(db, manager_oid):
+    """For each flight_number, how many of this manager's employees' clients booked it, and who."""
+    managed_employees = list(db.users.find({'role': 'employee', 'manager_id': manager_oid}, {'username': 1}))
+    employee_ids = [e['_id'] for e in managed_employees]
+    employees_by_id = {e['_id']: e['username'] for e in managed_employees}
+
+    counts = {}
+    for r in db.reports.find({'user_id': {'$in': employee_ids}, 'flight_number': {'$ne': None}}):
+        fn = r['flight_number']
+        counts.setdefault(fn, {'count': 0, 'details': []})
+        counts[fn]['count'] += 1
+        counts[fn]['details'].append({
+            'employee': employees_by_id.get(r['user_id'], 'Unknown'),
+            'client_name': r.get('client_name') or 'Unknown client'
+        })
+    return counts
+
+@app.route('/flights')
+def flights_page():
+    if 'user_id' not in session:
+        return redirect(url_for('login'))
+
+    db = get_db()
+    if db is None:
+        flash('Database connection error!', 'error')
+        return redirect(url_for('home'))
+
+    refresh_flights_if_stale(db)
+    flights = [serialize(f) for f in db.flights.find().sort('departure_scheduled', 1)]
+
+    booking_counts = {}
+    if session.get('role') == 'manager':
+        booking_counts = _flight_booking_counts(db, oid(session['user_id']))
+
+    return render_template(
+        'flights.html',
+        flights=flights,
+        booking_counts=booking_counts,
+        has_api_key=bool(AVIATIONSTACK_API_KEY)
+    )
+
+@app.route('/flights/refresh', methods=['POST'])
+def refresh_flights_now():
+    if 'user_id' not in session or session.get('role') != 'manager':
+        return redirect(url_for('login'))
+    db = get_db()
+    if db is not None:
+        refresh_flights_if_stale(db, force=True)
+        flash('Flights refreshed.', 'success')
+    return redirect(url_for('flights_page'))
+
+@app.route('/flights/<flight_id>/book', methods=['GET', 'POST'])
+def book_flight(flight_id):
+    if 'user_id' not in session or session.get('role') != 'employee':
+        return redirect(url_for('login'))
+
+    db = get_db()
+    if db is None:
+        flash('Database connection error!', 'error')
+        return redirect(url_for('flights_page'))
+
+    flight = db.flights.find_one({'_id': oid(flight_id)})
+    if not flight:
+        flash('That flight is no longer in the current list.', 'error')
+        return redirect(url_for('flights_page'))
+
+    if request.method == 'POST':
+        client_name = request.form.get('client_name', '').strip()
+        purpose = request.form.get('purpose', '').strip()
+        currency = request.form.get('local_currency', 'USD').strip()
+        amount_raw = request.form.get('local_amount', '0').strip()
+
+        if not client_name:
+            flash('Client name is required', 'error')
+            return redirect(url_for('book_flight', flight_id=flight_id))
+
+        try:
+            amount = float(amount_raw) if amount_raw else 0.0
+        except ValueError:
+            flash('Invalid amount provided', 'error')
+            return redirect(url_for('book_flight', flight_id=flight_id))
+
+        destination = flight.get('arrival_airport') or flight.get('arrival_iata')
+        date_from = (flight.get('departure_scheduled') or '')[:10] or None
+        date_to = (flight.get('arrival_scheduled') or '')[:10] or None
+
+        try:
+            user_oid = oid(session['user_id'])
+            _, usd_amount = _create_expense_and_report(
+                db, user_oid, destination, purpose, date_from, date_to,
+                currency, amount, request.files.get('receipt'),
+                client_name=client_name,
+                flight_number=flight.get('flight_number'),
+                airline_name=flight.get('airline_name')
+            )
+            flash(f'Booked {flight.get("flight_number")} for {client_name}! USD: ${usd_amount}', 'success')
+        except Exception as e:
+            print("Book flight error:", e)
+            flash(f'Error booking flight: {e}', 'error')
+
+        return redirect(url_for('employee_dashboard'))
+
+    return render_template('book_flight.html', flight=serialize(flight))
 
 # ---------- Currency converter page ----------
 @app.route('/currency_converter')
@@ -1128,6 +1326,63 @@ def api_analytics():
         return jsonify({'error': 'Database connection error'}), 503
     return jsonify(_compute_analytics(db, oid(g.user_id)))
 
+@app.route('/api/flights', methods=['GET'])
+@token_required
+def api_flights():
+    db = get_db()
+    if db is None:
+        return jsonify({'error': 'Database connection error'}), 503
+
+    refresh_flights_if_stale(db)
+    flights = [to_json_safe(f) for f in db.flights.find().sort('departure_scheduled', 1)]
+
+    booking_counts = {}
+    if g.role == 'manager':
+        booking_counts = _flight_booking_counts(db, oid(g.user_id))
+
+    return jsonify({'flights': flights, 'booking_counts': booking_counts})
+
+@app.route('/api/flights/<flight_id>/book', methods=['POST'])
+@token_required
+def api_book_flight(flight_id):
+    if g.role != 'employee':
+        return jsonify({'error': 'Only employees can book flights'}), 403
+
+    db = get_db()
+    if db is None:
+        return jsonify({'error': 'Database connection error'}), 503
+
+    flight = db.flights.find_one({'_id': oid(flight_id)})
+    if not flight:
+        return jsonify({'error': 'That flight is no longer in the current list'}), 404
+
+    data = request.get_json(silent=True) or request.form
+    client_name = (data.get('client_name') or '').strip()
+    purpose = (data.get('purpose') or '').strip()
+    currency = (data.get('currency') or 'USD').strip()
+
+    if not client_name:
+        return jsonify({'error': 'Client name is required'}), 400
+
+    try:
+        amount = float(data.get('amount') or 0)
+    except (ValueError, TypeError):
+        return jsonify({'error': 'Invalid amount provided'}), 400
+
+    destination = flight.get('arrival_airport') or flight.get('arrival_iata')
+    date_from = (flight.get('departure_scheduled') or '')[:10] or None
+    date_to = (flight.get('arrival_scheduled') or '')[:10] or None
+
+    user_oid = oid(g.user_id)
+    expense_doc, usd_amount = _create_expense_and_report(
+        db, user_oid, destination, purpose, date_from, date_to,
+        currency, amount, request.files.get('receipt'),
+        client_name=client_name,
+        flight_number=flight.get('flight_number'),
+        airline_name=flight.get('airline_name')
+    )
+    return jsonify({'message': 'Flight booked successfully', 'expense': to_json_safe(expense_doc)}), 201
+
 @app.route('/api/employee_dashboard', methods=['GET'])
 @token_required
 def api_employee_dashboard():
@@ -1173,50 +1428,15 @@ def api_add_expense():
     except (ValueError, TypeError):
         return jsonify({'error': 'Invalid amount provided'}), 400
 
-    usd_amount, exchange_rate = convert_to_usd(amount, currency)
-    if usd_amount is None:
-        usd_amount = amount
-        exchange_rate = 1.0
-
     db = get_db()
     if db is None:
         return jsonify({'error': 'Database connection error'}), 503
 
     user_oid = oid(g.user_id)
-    receipt_file_id = save_receipt_image(db, request.files.get('receipt'))
-
-    expense_doc = {
-        'user_id': user_oid,
-        'destination': destination,
-        'purpose': purpose,
-        'date_from': date_from,
-        'date_to': date_to,
-        'currency': currency,
-        'amount': amount,
-        'usd_amount': usd_amount,
-        'exchange_rate': exchange_rate,
-        'status': 'pending',
-        'receipt_file_id': receipt_file_id,
-        'created_at': datetime.utcnow()
-    }
-    result = db.expenses.insert_one(expense_doc)
-
-    report_title = f"Travel to {destination}" if destination else "Expense Report"
-    db.reports.insert_one({
-        'user_id': user_oid,
-        'title': report_title,
-        'period_from': date_from,
-        'period_to': date_to,
-        'total_amount': amount,
-        'usd_amount': usd_amount,
-        'currency': currency,
-        'status': 'pending',
-        'manager_comment': None,
-        'receipt_file_id': receipt_file_id,
-        'created_at': datetime.utcnow()
-    })
-
-    expense_doc['_id'] = result.inserted_id
+    expense_doc, usd_amount = _create_expense_and_report(
+        db, user_oid, destination, purpose, date_from, date_to,
+        currency, amount, request.files.get('receipt')
+    )
     return jsonify({'message': 'Expense added successfully', 'expense': to_json_safe(expense_doc)}), 201
 
 @app.route('/api/expenses/<expense_id>/receipt', methods=['GET'])
