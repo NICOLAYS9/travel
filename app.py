@@ -12,6 +12,7 @@ import webbrowser
 import jwt
 from dotenv import load_dotenv
 from flask_cors import CORS
+from werkzeug.security import generate_password_hash, check_password_hash
 
 load_dotenv()
 
@@ -92,6 +93,23 @@ def to_json_safe(doc):
         else:
             out[key] = value
     return out
+
+def log_audit(db, actor_id, actor_username, action, target=None, details=None):
+    """
+    Record a sensitive mutating action (approvals, employee management, etc.)
+    for accountability — who did what, to whom, and when.
+    """
+    try:
+        db.audit_log.insert_one({
+            'actor_id': oid(actor_id),
+            'actor_username': actor_username,
+            'action': action,
+            'target': target,
+            'details': details or {},
+            'created_at': datetime.utcnow()
+        })
+    except Exception as e:
+        print("Audit log write failed:", e)
 
 # ------------------ API AUTH (JWT, for the Flutter app) ------------------
 def generate_token(user):
@@ -231,11 +249,12 @@ def init_db():
 
     try:
         db.users.create_index('username', unique=True)
+        db.audit_log.create_index('created_at')
 
         if not db.users.find_one({'username': 'admin'}):
             db.users.insert_one({
                 'username': 'admin',
-                'password': 'admin123',
+                'password': generate_password_hash('admin123'),
                 'email': 'admin@company.com',
                 'role': 'manager',
                 'manager_id': None
@@ -244,7 +263,7 @@ def init_db():
         if not db.users.find_one({'username': 'employee'}):
             db.users.insert_one({
                 'username': 'employee',
-                'password': 'employee123',
+                'password': generate_password_hash('employee123'),
                 'email': 'employee@company.com',
                 'role': 'employee',
                 'manager_id': None
@@ -273,7 +292,8 @@ def login():
             return render_template('login.html')
 
         try:
-            user = db.users.find_one({'username': username, 'password': password})
+            candidate = db.users.find_one({'username': username})
+            user = candidate if candidate and check_password_hash(candidate['password'], password) else None
         except Exception as e:
             print("Login query error:", e)
             user = None
@@ -586,13 +606,15 @@ def add_employee():
     try:
         # Set manager_id to current manager for employees
         manager_id_value = oid(session['user_id']) if role == 'employee' else None
-        db.users.insert_one({
+        result = db.users.insert_one({
             'username': username,
-            'password': password,
+            'password': generate_password_hash(password),
             'email': email,
             'role': role,
             'manager_id': manager_id_value
         })
+        log_audit(db, session['user_id'], session['username'], 'add_employee',
+                  target=str(result.inserted_id), details={'username': username, 'role': role})
         flash(f'Employee {username} added successfully!', 'success')
     except DuplicateKeyError:
         flash('Username already exists!', 'error')
@@ -635,7 +657,7 @@ def edit_employee():
         # Update employee with proper manager_id handling
         update_fields = {'username': username, 'email': email, 'role': role}
         if password:
-            update_fields['password'] = password
+            update_fields['password'] = generate_password_hash(password)
 
         if role == 'employee':
             update_fields['manager_id'] = oid(session['user_id'])
@@ -643,6 +665,8 @@ def edit_employee():
             update_fields['manager_id'] = None
 
         db.users.update_one({'_id': employee_oid}, {'$set': update_fields})
+        log_audit(db, session['user_id'], session['username'], 'edit_employee',
+                  target=employee_id, details={'username': username, 'role': role, 'password_changed': bool(password)})
         flash(f'Employee {username} updated successfully!', 'success')
 
     except Exception as e:
@@ -681,6 +705,8 @@ def delete_employee():
         db.users.delete_one({'_id': employee_oid})
         db.expenses.delete_many({'user_id': employee_oid})
         db.reports.delete_many({'user_id': employee_oid})
+        log_audit(db, session['user_id'], session['username'], 'delete_employee',
+                  target=employee_id, details={'username': owner.get('username')})
         flash('Employee deleted successfully!', 'success')
 
     except Exception as e:
@@ -745,6 +771,7 @@ def approve_report(report_id):
             return redirect(url_for('reports'))
 
         db.reports.update_one({'_id': oid(report_id)}, {'$set': {'status': 'approved'}})
+        log_audit(db, session['user_id'], session['username'], 'approve_report', target=report_id)
         flash('Report approved successfully!', 'success')
     except Exception as e:
         print("Approve report error:", e)
@@ -775,12 +802,30 @@ def decline_report():
             {'_id': oid(report_id)},
             {'$set': {'status': 'declined', 'manager_comment': comment}}
         )
+        log_audit(db, session['user_id'], session['username'], 'decline_report',
+                  target=report_id, details={'comment': comment})
         flash(f'Report declined. Reason: {comment}', 'info')
     except Exception as e:
         print("Decline report error:", e)
         flash('Error declining report', 'error')
 
     return redirect(url_for('reports'))
+
+# ---------- Audit Log (manager only) ----------
+@app.route('/audit_log')
+def audit_log_page():
+    if 'user_id' not in session or session.get('role') != 'manager':
+        return redirect(url_for('login'))
+
+    db = get_db()
+    if db is None:
+        flash('Database connection error!', 'error')
+        return redirect(url_for('dashboard'))
+
+    manager_oid = oid(session['user_id'])
+    entries = [serialize(e) for e in
+               db.audit_log.find({'actor_id': manager_oid}).sort('created_at', -1).limit(200)]
+    return render_template('audit_log.html', entries=entries)
 
 # ==================================================================
 # JSON API (token-auth) — used by the Flutter mobile app.
@@ -798,7 +843,8 @@ def api_login():
     if db is None:
         return jsonify({'error': 'Database connection error'}), 503
 
-    user = db.users.find_one({'username': username, 'password': password})
+    candidate = db.users.find_one({'username': username})
+    user = candidate if candidate and check_password_hash(candidate['password'], password) else None
     if not user:
         return jsonify({'error': 'Invalid username or password'}), 401
 
@@ -1003,6 +1049,7 @@ def api_approve_report(report_id):
         return jsonify({'error': 'Not authorized to approve this report'}), 403
 
     db.reports.update_one({'_id': oid(report_id)}, {'$set': {'status': 'approved'}})
+    log_audit(db, g.user_id, g.username, 'approve_report', target=report_id)
     return jsonify({'message': 'Report approved successfully'})
 
 @app.route('/api/reports/<report_id>/decline', methods=['POST'])
@@ -1023,6 +1070,7 @@ def api_decline_report(report_id):
         {'_id': oid(report_id)},
         {'$set': {'status': 'declined', 'manager_comment': comment}}
     )
+    log_audit(db, g.user_id, g.username, 'decline_report', target=report_id, details={'comment': comment})
     return jsonify({'message': f'Report declined. Reason: {comment}'})
 
 @app.route('/api/employees', methods=['GET'])
@@ -1036,6 +1084,18 @@ def api_list_employees():
     employees = [to_json_safe(e) for e in
                  db.users.find({'role': 'employee', 'manager_id': manager_oid}, {'password': 0})]
     return jsonify(employees)
+
+@app.route('/api/audit_log', methods=['GET'])
+@manager_required
+def api_audit_log():
+    db = get_db()
+    if db is None:
+        return jsonify({'error': 'Database connection error'}), 503
+
+    manager_oid = oid(g.user_id)
+    entries = [to_json_safe(e) for e in
+               db.audit_log.find({'actor_id': manager_oid}).sort('created_at', -1).limit(200)]
+    return jsonify(entries)
 
 @app.route('/api/employees', methods=['POST'])
 @manager_required
@@ -1054,11 +1114,13 @@ def api_add_employee():
         manager_id_value = oid(g.user_id) if role == 'employee' else None
         result = db.users.insert_one({
             'username': username,
-            'password': password,
+            'password': generate_password_hash(password),
             'email': email,
             'role': role,
             'manager_id': manager_id_value
         })
+        log_audit(db, g.user_id, g.username, 'add_employee',
+                  target=str(result.inserted_id), details={'username': username, 'role': role})
         return jsonify({'message': f'Employee {username} added successfully', 'id': str(result.inserted_id)}), 201
     except DuplicateKeyError:
         return jsonify({'error': 'Username already exists'}), 409
@@ -1087,10 +1149,12 @@ def api_edit_employee(employee_id):
 
     update_fields = {'username': username, 'email': email, 'role': role}
     if password:
-        update_fields['password'] = password
+        update_fields['password'] = generate_password_hash(password)
     update_fields['manager_id'] = oid(g.user_id) if role == 'employee' else None
 
     db.users.update_one({'_id': employee_oid}, {'$set': update_fields})
+    log_audit(db, g.user_id, g.username, 'edit_employee',
+              target=employee_id, details={'username': username, 'role': role, 'password_changed': bool(password)})
     return jsonify({'message': f'Employee {username} updated successfully'})
 
 @app.route('/api/employees/<employee_id>', methods=['DELETE'])
@@ -1112,6 +1176,8 @@ def api_delete_employee(employee_id):
     db.users.delete_one({'_id': employee_oid})
     db.expenses.delete_many({'user_id': employee_oid})
     db.reports.delete_many({'user_id': employee_oid})
+    log_audit(db, g.user_id, g.username, 'delete_employee',
+              target=employee_id, details={'username': owner.get('username')})
     return jsonify({'message': 'Employee deleted successfully'})
 
 @app.route('/api/convert_currency', methods=['POST'])
