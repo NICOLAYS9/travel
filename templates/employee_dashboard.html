@@ -6,13 +6,36 @@ Pro{% endblock %} {% block content %}
 
 <!-- Add Expense Form -->
 <div class="card">
-  <h3>Add New Expense</h3>
+  <h3>{% if prefill %}Book Flight for Client{% else %}Add New Expense{% endif %}</h3>
+  {% if prefill %}
+  <div class="alert alert-info">
+    Booking <strong>{{ prefill.flight_number }}</strong> ({{ prefill.airline_name }})
+    for a client &mdash; destination and dates are pre-filled below. Add the
+    client's name and price to confirm.
+  </div>
+  {% endif %}
   <form
     method="POST"
     action="{{ url_for('add_expense') }}"
     enctype="multipart/form-data"
   >
+    {% if prefill %}
+    <input type="hidden" name="flight_number" value="{{ prefill.flight_number }}" />
+    <input type="hidden" name="airline_name" value="{{ prefill.airline_name }}" />
+    {% endif %}
     <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px">
+      {% if prefill %}
+      <div class="form-group">
+        <label for="client_name">Client Name</label>
+        <input
+          type="text"
+          id="client_name"
+          name="client_name"
+          class="form-control"
+          required
+        />
+      </div>
+      {% endif %}
       <div class="form-group">
         <label for="destination">Destination</label>
         <input
@@ -20,6 +43,7 @@ Pro{% endblock %} {% block content %}
           id="destination"
           name="destination"
           class="form-control"
+          value="{{ prefill.destination if prefill else '' }}"
           required
         />
       </div>
@@ -40,6 +64,7 @@ Pro{% endblock %} {% block content %}
           id="date_from"
           name="date_from"
           class="form-control"
+          value="{{ prefill.date_from if prefill else '' }}"
           required
         />
       </div>
@@ -50,6 +75,7 @@ Pro{% endblock %} {% block content %}
           id="date_to"
           name="date_to"
           class="form-control"
+          value="{{ prefill.date_to if prefill else '' }}"
           required
         />
       </div>
@@ -105,7 +131,9 @@ Pro{% endblock %} {% block content %}
         />
       </div>
     </div>
-    <button type="submit" class="btn btn-primary">Add Expense</button>
+    <button type="submit" class="btn btn-primary">
+      {% if prefill %}Confirm Booking{% else %}Add Expense{% endif %}
+    </button>
   </form>
 </div>
 

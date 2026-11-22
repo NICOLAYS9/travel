@@ -79,7 +79,7 @@ endblock %} {% block content %}
         {% else %}
         <td>
           <a
-            href="{{ url_for('book_flight', flight_id=flight.get('id')) }}"
+            href="{{ url_for('employee_dashboard', flight_id=flight.get('id')) }}"
             class="btn btn-primary"
             style="padding: 6px 12px; font-size: 13px"
             >Book for Client</a

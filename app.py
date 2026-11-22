@@ -619,12 +619,28 @@ def employee_dashboard():
         rates_data = get_exchange_rates()
         current_rates = rates_data.get('rates', {}) if rates_data else {}
 
+        # Coming from "Book for Client" on the Flights page? Pre-fill the
+        # Add Expense form from that flight instead of a separate page.
+        prefill = None
+        flight_id = request.args.get('flight_id')
+        if flight_id:
+            flight = db.flights.find_one({'_id': oid(flight_id)})
+            if flight:
+                prefill = {
+                    'destination': flight.get('arrival_airport') or flight.get('arrival_iata'),
+                    'date_from': (flight.get('departure_scheduled') or '')[:10],
+                    'date_to': (flight.get('arrival_scheduled') or '')[:10],
+                    'flight_number': flight.get('flight_number'),
+                    'airline_name': flight.get('airline_name')
+                }
+
         return render_template(
             'employee_dashboard.html',
             expenses=expenses,
             reports=reports,
             exchange_rates=current_rates,
-            session=session
+            session=session,
+            prefill=prefill
         )
 
     except Exception as e:
@@ -635,7 +651,8 @@ def employee_dashboard():
             expenses=[],
             reports=[],
             exchange_rates={},
-            session=session
+            session=session,
+            prefill=None
         )
 
 
@@ -653,6 +670,11 @@ def add_expense():
     currency = request.form.get('local_currency', 'USD').strip()   # matches the form select name
     amount_raw = request.form.get('local_amount', '0').strip()
 
+    # Present only when booking a flight for a client (see Flights page)
+    client_name = request.form.get('client_name', '').strip() or None
+    flight_number = request.form.get('flight_number', '').strip() or None
+    airline_name = request.form.get('airline_name', '').strip() or None
+
     try:
         amount = float(amount_raw) if amount_raw else 0.0
     except ValueError:
@@ -668,7 +690,8 @@ def add_expense():
         user_oid = oid(session['user_id'])
         _, usd_amount = _create_expense_and_report(
             db, user_oid, destination, purpose, date_from, date_to,
-            currency, amount, request.files.get('receipt')
+            currency, amount, request.files.get('receipt'),
+            client_name=client_name, flight_number=flight_number, airline_name=airline_name
         )
         flash(f'Expense added successfully! Original: {amount} {currency}, USD: ${usd_amount}', 'success')
 
@@ -770,59 +793,6 @@ def refresh_flights_now():
         refresh_flights_if_stale(db, force=True)
         flash('Flights refreshed.', 'success')
     return redirect(url_for('flights_page'))
-
-@app.route('/flights/<flight_id>/book', methods=['GET', 'POST'])
-def book_flight(flight_id):
-    if 'user_id' not in session or session.get('role') != 'employee':
-        return redirect(url_for('login'))
-
-    db = get_db()
-    if db is None:
-        flash('Database connection error!', 'error')
-        return redirect(url_for('flights_page'))
-
-    flight = db.flights.find_one({'_id': oid(flight_id)})
-    if not flight:
-        flash('That flight is no longer in the current list.', 'error')
-        return redirect(url_for('flights_page'))
-
-    if request.method == 'POST':
-        client_name = request.form.get('client_name', '').strip()
-        purpose = request.form.get('purpose', '').strip()
-        currency = request.form.get('local_currency', 'USD').strip()
-        amount_raw = request.form.get('local_amount', '0').strip()
-
-        if not client_name:
-            flash('Client name is required', 'error')
-            return redirect(url_for('book_flight', flight_id=flight_id))
-
-        try:
-            amount = float(amount_raw) if amount_raw else 0.0
-        except ValueError:
-            flash('Invalid amount provided', 'error')
-            return redirect(url_for('book_flight', flight_id=flight_id))
-
-        destination = flight.get('arrival_airport') or flight.get('arrival_iata')
-        date_from = (flight.get('departure_scheduled') or '')[:10] or None
-        date_to = (flight.get('arrival_scheduled') or '')[:10] or None
-
-        try:
-            user_oid = oid(session['user_id'])
-            _, usd_amount = _create_expense_and_report(
-                db, user_oid, destination, purpose, date_from, date_to,
-                currency, amount, request.files.get('receipt'),
-                client_name=client_name,
-                flight_number=flight.get('flight_number'),
-                airline_name=flight.get('airline_name')
-            )
-            flash(f'Booked {flight.get("flight_number")} for {client_name}! USD: ${usd_amount}', 'success')
-        except Exception as e:
-            print("Book flight error:", e)
-            flash(f'Error booking flight: {e}', 'error')
-
-        return redirect(url_for('employee_dashboard'))
-
-    return render_template('book_flight.html', flight=serialize(flight))
 
 # ---------- Currency converter page ----------
 @app.route('/currency_converter')
