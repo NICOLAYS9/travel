@@ -307,7 +307,7 @@ def refresh_flights_if_stale(db, force=False):
         response = requests.get(
             'http://api.aviationstack.com/v1/flights',
             params={'access_key': AVIATIONSTACK_API_KEY, 'limit': 100},
-            timeout=15
+            timeout=25
         )
         response.raise_for_status()
         data = response.json().get('data', [])
@@ -344,6 +344,14 @@ def refresh_flights_if_stale(db, force=False):
         )
     except Exception as e:
         print("Flight cache refresh failed:", e)
+        try:
+            db.flight_cache_meta.update_one(
+                {'_id': 'singleton'},
+                {'$set': {'last_error': str(e), 'last_error_at': datetime.utcnow()}},
+                upsert=True
+            )
+        except Exception:
+            pass
 
 def _create_expense_and_report(db, user_oid, destination, purpose, date_from, date_to,
                                 currency, amount, receipt_file, client_name=None,
