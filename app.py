@@ -276,7 +276,7 @@ def convert_currency(amount, from_currency, to_currency):
     return round(amount, 2)
 
 # ------------------ FLIGHTS (AviationStack, cached) ------------------
-AVIATIONSTACK_API_KEY = os.environ.get('AVIATIONSTACK_API_KEY')
+AVIATIONSTACK_API_KEY = (os.environ.get('AVIATIONSTACK_API_KEY') or '').strip() or None
 FLIGHT_CACHE_TTL_HOURS = 12
 FLIGHT_CACHE_MONTHLY_CALL_LIMIT = 90  # AviationStack free tier allows 100/month - leave headroom
 
