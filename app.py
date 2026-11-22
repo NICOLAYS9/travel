@@ -12,6 +12,8 @@ import webbrowser
 import jwt
 import csv
 import io
+import gridfs
+from PIL import Image
 from dotenv import load_dotenv
 from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -32,6 +34,7 @@ app.config.update(
     SESSION_COOKIE_SECURE=False,    # must be False on HTTP localhost
     SESSION_COOKIE_SAMESITE='Lax'   # prevents some CSRF warnings
 )
+app.config['MAX_CONTENT_LENGTH'] = 15 * 1024 * 1024  # 15MB cap on uploaded receipt photos
 
 # ------------------ DATABASE CONNECTION ------------------
 MONGODB_URI = os.environ.get('MONGODB_URI')
@@ -112,6 +115,41 @@ def log_audit(db, actor_id, actor_username, action, target=None, details=None):
         })
     except Exception as e:
         print("Audit log write failed:", e)
+
+# ------------------ RECEIPT PHOTOS (GridFS) ------------------
+def save_receipt_image(db, file_storage):
+    """
+    Resize/recompress an uploaded receipt photo before storing it in GridFS -
+    Atlas's free tier only has 512MB total storage, so keeping each photo
+    small (max 1600px, JPEG ~70% quality) matters.
+    Returns the new file's ObjectId, or None if there's no usable file.
+    """
+    if not file_storage or not file_storage.filename:
+        return None
+
+    try:
+        image = Image.open(file_storage.stream)
+        image = image.convert('RGB')
+        image.thumbnail((1600, 1600))
+
+        buffer = io.BytesIO()
+        image.save(buffer, format='JPEG', quality=70)
+        buffer.seek(0)
+
+        fs = gridfs.GridFS(db, collection='receipts')
+        return fs.put(buffer.read(), content_type='image/jpeg', filename=file_storage.filename)
+    except Exception as e:
+        print("Receipt image save failed:", e)
+        return None
+
+def _can_view_receipt(db, owner_user_id, viewer_id, viewer_role):
+    """True if viewer is the receipt's owner, or that owner's assigned manager."""
+    if str(owner_user_id) == str(viewer_id):
+        return True
+    if viewer_role == 'manager':
+        owner = db.users.find_one({'_id': oid(owner_user_id)})
+        return bool(owner) and owner.get('manager_id') == oid(viewer_id)
+    return False
 
 # ------------------ API AUTH (JWT, for the Flutter app) ------------------
 def generate_token(user):
@@ -497,6 +535,7 @@ def add_expense():
 
     try:
         user_oid = oid(session['user_id'])
+        receipt_file_id = save_receipt_image(db, request.files.get('receipt'))
 
         # Insert expense with status = 'pending'
         db.expenses.insert_one({
@@ -510,6 +549,7 @@ def add_expense():
             'usd_amount': usd_amount,
             'exchange_rate': exchange_rate,
             'status': 'pending',
+            'receipt_file_id': receipt_file_id,
             'created_at': datetime.utcnow()
         })
 
@@ -525,6 +565,7 @@ def add_expense():
             'currency': currency,
             'status': 'pending',
             'manager_comment': None,
+            'receipt_file_id': receipt_file_id,
             'created_at': datetime.utcnow()
         })
 
@@ -535,6 +576,47 @@ def add_expense():
         flash(f'Error adding expense: {e}', 'error')
 
     return redirect(url_for('employee_dashboard'))
+
+# ---------- Receipt photo ----------
+@app.route('/expenses/<expense_id>/receipt')
+def view_receipt(expense_id):
+    if 'user_id' not in session:
+        return redirect(url_for('login'))
+
+    db = get_db()
+    if db is None:
+        return ('Database connection error', 503)
+
+    expense = db.expenses.find_one({'_id': oid(expense_id)})
+    if not expense or not expense.get('receipt_file_id'):
+        return ('Receipt not found', 404)
+
+    if not _can_view_receipt(db, expense['user_id'], session['user_id'], session.get('role')):
+        return ('Not authorized', 403)
+
+    fs = gridfs.GridFS(db, collection='receipts')
+    grid_file = fs.get(expense['receipt_file_id'])
+    return Response(grid_file.read(), mimetype=grid_file.content_type or 'image/jpeg')
+
+@app.route('/reports/<report_id>/receipt')
+def view_report_receipt(report_id):
+    if 'user_id' not in session:
+        return redirect(url_for('login'))
+
+    db = get_db()
+    if db is None:
+        return ('Database connection error', 503)
+
+    report = db.reports.find_one({'_id': oid(report_id)})
+    if not report or not report.get('receipt_file_id'):
+        return ('Receipt not found', 404)
+
+    if not _can_view_receipt(db, report['user_id'], session['user_id'], session.get('role')):
+        return ('Not authorized', 403)
+
+    fs = gridfs.GridFS(db, collection='receipts')
+    grid_file = fs.get(report['receipt_file_id'])
+    return Response(grid_file.read(), mimetype=grid_file.content_type or 'image/jpeg')
 
 # ---------- Currency converter page ----------
 @app.route('/currency_converter')
@@ -1101,6 +1183,7 @@ def api_add_expense():
         return jsonify({'error': 'Database connection error'}), 503
 
     user_oid = oid(g.user_id)
+    receipt_file_id = save_receipt_image(db, request.files.get('receipt'))
 
     expense_doc = {
         'user_id': user_oid,
@@ -1113,6 +1196,7 @@ def api_add_expense():
         'usd_amount': usd_amount,
         'exchange_rate': exchange_rate,
         'status': 'pending',
+        'receipt_file_id': receipt_file_id,
         'created_at': datetime.utcnow()
     }
     result = db.expenses.insert_one(expense_doc)
@@ -1128,11 +1212,48 @@ def api_add_expense():
         'currency': currency,
         'status': 'pending',
         'manager_comment': None,
+        'receipt_file_id': receipt_file_id,
         'created_at': datetime.utcnow()
     })
 
     expense_doc['_id'] = result.inserted_id
     return jsonify({'message': 'Expense added successfully', 'expense': to_json_safe(expense_doc)}), 201
+
+@app.route('/api/expenses/<expense_id>/receipt', methods=['GET'])
+@token_required
+def api_view_receipt(expense_id):
+    db = get_db()
+    if db is None:
+        return jsonify({'error': 'Database connection error'}), 503
+
+    expense = db.expenses.find_one({'_id': oid(expense_id)})
+    if not expense or not expense.get('receipt_file_id'):
+        return jsonify({'error': 'Receipt not found'}), 404
+
+    if not _can_view_receipt(db, expense['user_id'], g.user_id, g.role):
+        return jsonify({'error': 'Not authorized'}), 403
+
+    fs = gridfs.GridFS(db, collection='receipts')
+    grid_file = fs.get(expense['receipt_file_id'])
+    return Response(grid_file.read(), mimetype=grid_file.content_type or 'image/jpeg')
+
+@app.route('/api/reports/<report_id>/receipt', methods=['GET'])
+@token_required
+def api_view_report_receipt(report_id):
+    db = get_db()
+    if db is None:
+        return jsonify({'error': 'Database connection error'}), 503
+
+    report = db.reports.find_one({'_id': oid(report_id)})
+    if not report or not report.get('receipt_file_id'):
+        return jsonify({'error': 'Receipt not found'}), 404
+
+    if not _can_view_receipt(db, report['user_id'], g.user_id, g.role):
+        return jsonify({'error': 'Not authorized'}), 403
+
+    fs = gridfs.GridFS(db, collection='receipts')
+    grid_file = fs.get(report['receipt_file_id'])
+    return Response(grid_file.read(), mimetype=grid_file.content_type or 'image/jpeg')
 
 @app.route('/api/reports', methods=['GET'])
 @token_required

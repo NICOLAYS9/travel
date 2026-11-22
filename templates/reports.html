@@ -40,6 +40,7 @@ endblock %} {% block content %}
         <th>USD Amount</th>
         <th>Status</th>
         <th>Created</th>
+        <th>Receipt</th>
         {% if session.role == 'manager' %}
         <th>Actions</th>
         {% endif %}
@@ -71,6 +72,17 @@ endblock %} {% block content %}
           </span>
         </td>
         <td>{{ report.get('created_at', 'N/A') }}</td>
+        <td>
+          {% if report.get('receipt_file_id') %}
+          <a
+            href="{{ url_for('view_report_receipt', report_id=report.get('id')) }}"
+            target="_blank"
+            class="btn btn-secondary"
+            style="padding: 4px 10px; font-size: 13px"
+            >View</a
+          >
+          {% else %} - {% endif %}
+        </td>
 
         {% if session.role == 'manager' %} {% if status == 'pending' %}
         <td>
